@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 # Version
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 # Configuration directory
 CONFIG_DIR = Path.home() / ".config" / "opencode"
@@ -283,26 +283,40 @@ def display_config_preview(config_path: Path, box: BoxChars):
         input("\nPress Enter to continue...")
 
 
-def display_menu(configs: List[Path], box: BoxChars):
+def display_menu(configs: List[Path], box: BoxChars, selected_index: Optional[int] = None):
     """Display the configuration selection menu"""
     clear_screen()
 
     print_box_header(
-        "OpenCode Configuration Switcher v1.0.1",
-        "Commands: 1-9=select | d#=details | q=quit | Enter=apply",
+        "OpenCode Configuration Switcher v1.1.0",
+        "Commands: 1-9=select | d#=details | C/Enter=apply | q=quit",
         box
     )
 
     print_header("\nAvailable Configurations")
     print_sep(box)
 
-    # Print numbered list
+    # Print header with column alignment
+    print(f"  {'SEL':<4} {'#':<3} {'Filename'}")
+    print_sep(box)
+
+    # Print numbered list with selection indicator
     for idx, config in enumerate(configs, 1):
-        # Add (current) label to the first item
-        if idx == 1 and config == CURRENT_CONFIG:
-            print(f"  {Colors.BOLD}{idx}{Colors.NC}) {Colors.GREEN}{config.name}{Colors.NC} {Colors.YELLOW}(current){Colors.NC}")
+        # Determine selection marker
+        is_selected = (selected_index is not None and idx - 1 == selected_index)
+        if is_selected:
+            sel_marker = f"{Colors.GREEN}[{Colors.BOLD}*{Colors.NC}{Colors.GREEN}]{Colors.NC}"
         else:
-            print(f"  {Colors.BOLD}{idx}{Colors.NC}) {Colors.CYAN}{config.name}{Colors.NC}")
+            sel_marker = "[ ]"
+
+        # Build the config name with (current) label if applicable
+        if idx == 1 and config == CURRENT_CONFIG:
+            config_name = f"{Colors.GREEN}{config.name}{Colors.NC} {Colors.YELLOW}(current){Colors.NC}"
+        else:
+            config_name = f"{Colors.CYAN}{config.name}{Colors.NC}"
+
+        # Format: [SEL] #) Filename
+        print(f"  {sel_marker:<4} {Colors.BOLD}{idx}){Colors.NC} {config_name}")
 
     print_sep(box)
 
@@ -376,7 +390,7 @@ def main():
     selected_index = None
 
     while True:
-        display_menu(configs, box)
+        display_menu(configs, box, selected_index)
 
         # Get user input
         try:
@@ -385,8 +399,8 @@ def main():
             print(f"\n\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
             sys.exit(0)
 
-        # Handle empty input (apply selection)
-        if not user_input:
+        # Handle C or empty input (apply selection)
+        if not user_input or user_input.upper() == 'C':
             if selected_index is not None:
                 print()  # Blank line for readability
                 if apply_config(configs[selected_index]):
@@ -443,7 +457,7 @@ def main():
                 input("Press Enter to continue...")
         except ValueError:
             log_error(f"Invalid input: {user_input}")
-            log_info("Valid commands: number, d#, q, or Enter to apply")
+            log_info("Valid commands: number, d#, C/Enter to apply, q to quit")
             input("Press Enter to continue...")
 
 

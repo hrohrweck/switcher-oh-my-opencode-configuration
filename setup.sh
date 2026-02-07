@@ -16,7 +16,7 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # Version
-VERSION="1.0.1"
+VERSION="1.1.0"
 
 # Configuration
 SCRIPT_NAME="switch_oh-my-opencode_config.py"
