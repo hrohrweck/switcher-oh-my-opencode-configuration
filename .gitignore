@@ -163,6 +163,8 @@ secret-*.*
 .claude/.env.local*
 .claude/local/
 .claude/plans/
+.claude/agent-memory/
+.claude/worktrees/
 
 # Skill-specific credentials
 .claude/skills/*/.env*
@@ -170,6 +172,15 @@ secret-*.*
 .claude/skills/*/*/*secret*
 .claude/skills/*/*/*key*
 .claude/skills/*/*/*token*
+# Re-include legitimate skill module files containing "token" in their name
+!.claude/skills/*/modules/*token*.md
+
+# ===========================================
+# Local-Only Files (never sync via git pull)
+# ===========================================
+.moai/status_line.sh
+.moai/memory/
+.moai/worktrees/
 
 # ===========================================
 # Node.js (for docs/Nextra)
@@ -195,25 +206,23 @@ dist-ssr/
 .firebase/
 
 # ===========================================
-# Project-specific Files
+# MoAI & Claude Configuration (sensitive)
 # ===========================================
-# Configuration files that shouldn't be committed
-oh-my-opencode.json
-oh-my-opencode.json.BAK
-*.log
-*.tmp
+.moai/
+.claude/
+.agency/
 
-# MoAI configuration files
-.moai/specs/
-.moai/plans/
-.claude/agent-memory/
-.claude/projects/
-.claude/settings.json
-.claude/hooks/
-.moai/status_line.sh
-
-# Local configuration files
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+# ===========================================
+# WSL device files & local dotfiles
+# ===========================================
+.bash_profile
+.bashrc
+.gitconfig
+.profile
+.ripgreprc
+.zprofile
+.zshrc
+.gitmodules
+secrets
+.idea/
+.vscode/
