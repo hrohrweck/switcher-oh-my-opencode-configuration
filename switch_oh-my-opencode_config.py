@@ -12,12 +12,37 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 # Version
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Configuration directory
 CONFIG_DIR = Path.home() / ".config" / "opencode"
+
+# Legacy opencode config paths (deprecated)
 CURRENT_CONFIG = CONFIG_DIR / "oh-my-opencode.json"
 BACKUP_CONFIG = CONFIG_DIR / "oh-my-opencode.json.BAK"
+
+# New openagent config paths (preferred)
+CURRENT_CONFIG_AGENT = CONFIG_DIR / "oh-my-openagent.json"
+BACKUP_CONFIG_AGENT = CONFIG_DIR / "oh-my-openagent.json.BAK"
+
+
+def get_active_config() -> Path:
+    """Determine the active configuration file.
+    
+    Prefers oh-my-openagent.json (new name) over oh-my-opencode.json (deprecated).
+    Returns the path that exists, or the new preferred path if neither exists.
+    """
+    if CURRENT_CONFIG_AGENT.exists():
+        return CURRENT_CONFIG_AGENT
+    return CURRENT_CONFIG
+
+
+def get_backup_config() -> Path:
+    """Get the backup path matching the active configuration."""
+    active = get_active_config()
+    if active == CURRENT_CONFIG_AGENT:
+        return BACKUP_CONFIG_AGENT
+    return BACKUP_CONFIG
 
 # ANSI Color codes
 class Colors:
@@ -129,16 +154,26 @@ def get_available_configs() -> List[Path]:
         sys.exit(1)
 
     config_files = []
+    active_config = get_active_config()
 
     # First, add the current config if it exists (will be item #1)
-    if CURRENT_CONFIG.exists():
-        config_files.append(CURRENT_CONFIG)
+    if active_config.exists():
+        config_files.append(active_config)
 
-    # Then add all other config files (excluding current and backup)
+    # Collect config files from both naming conventions
+    seen = {f.name for f in config_files}
+    
+    # Legacy oh-my-opencode files
     for file in CONFIG_DIR.glob("oh-my-opencode*.json"):
-        # Exclude the current config (already added) and backup file
-        if file.name != "oh-my-opencode.json" and not file.name.endswith(".BAK"):
+        if file.name not in seen and file.name != "oh-my-opencode.json" and not file.name.endswith(".BAK"):
             config_files.append(file)
+            seen.add(file.name)
+    
+    # New oh-my-openagent files
+    for file in CONFIG_DIR.glob("oh-my-openagent*.json"):
+        if file.name not in seen and file.name != "oh-my-openagent.json" and not file.name.endswith(".BAK"):
+            config_files.append(file)
+            seen.add(file.name)
 
     return sorted(config_files)
 
@@ -310,7 +345,8 @@ def display_menu(configs: List[Path], box: BoxChars, selected_index: Optional[in
             sel_marker = "[ ]"
 
         # Build the config name with (current) label if applicable
-        if idx == 1 and config == CURRENT_CONFIG:
+        active_config = get_active_config()
+        if idx == 1 and config == active_config:
             config_name = f"{Colors.GREEN}{config.name}{Colors.NC} {Colors.YELLOW}(current){Colors.NC}"
         else:
             config_name = f"{Colors.CYAN}{config.name}{Colors.NC}"
@@ -321,30 +357,34 @@ def display_menu(configs: List[Path], box: BoxChars, selected_index: Optional[in
     print_sep(box)
 
     # Show backup status
-    if BACKUP_CONFIG.exists():
-        print(f"\n{Colors.BOLD}Backup exists:{Colors.NC} {BACKUP_CONFIG}")
+    backup_config = get_backup_config()
+    if backup_config.exists():
+        print(f"\n{Colors.BOLD}Backup exists:{Colors.NC} {backup_config}")
     else:
         print(f"\n{Colors.YELLOW}No backup file (will be created on first switch){Colors.NC}")
 
 
 def apply_config(source: Path) -> bool:
     """Apply the selected configuration"""
+    active_config = get_active_config()
+    backup_config = get_backup_config()
+
     # Special case: if user selects the current config (item #1), do nothing
-    if source == CURRENT_CONFIG:
+    if source == active_config:
         log_info(f"No change - already using this configuration")
-        log_info(f"Current file: {CURRENT_CONFIG}")
+        log_info(f"Current file: {active_config}")
         return True
 
     try:
         # Step 1: Backup current config
-        if CURRENT_CONFIG.exists():
-            log_info(f"Creating backup: {BACKUP_CONFIG}")
-            shutil.copy2(CURRENT_CONFIG, BACKUP_CONFIG)
+        if active_config.exists():
+            log_info(f"Creating backup: {backup_config}")
+            shutil.copy2(active_config, backup_config)
             log_success("Backup created successfully")
 
         # Step 2: Copy selected config to current
-        log_info(f"Copying {source.name} -> oh-my-opencode.json")
-        shutil.copy2(source, CURRENT_CONFIG)
+        log_info(f"Copying {source.name} -> {active_config.name}")
+        shutil.copy2(source, active_config)
 
         log_success(f"Configuration switched to: {source.name}")
         return True
@@ -356,11 +396,12 @@ def apply_config(source: Path) -> bool:
 
 def show_current_config_details(box: BoxChars):
     """Show details of current configuration"""
-    if not CURRENT_CONFIG.exists():
+    active_config = get_active_config()
+    if not active_config.exists():
         log_warning("No current configuration file exists")
         return
 
-    display_config_preview(CURRENT_CONFIG, box)
+    display_config_preview(active_config, box)
 
 
 def main():
@@ -383,7 +424,8 @@ def main():
 
     if not configs:
         log_error(f"No configuration files found in {CONFIG_DIR}")
-        log_info("Expected files: oh-my-opencode-*.json (excluding oh-my-opencode.json)")
+        log_info("Expected files: oh-my-openagent-*.json or oh-my-opencode-*.json")
+        log_info("(excluding the current active config file)")
         sys.exit(1)
 
     # Main menu loop
@@ -405,12 +447,13 @@ def main():
                 print()  # Blank line for readability
                 if apply_config(configs[selected_index]):
                     # Check if we actually applied a new config or just showed "no change"
-                    if configs[selected_index] == CURRENT_CONFIG:
+                    active_config = get_active_config()
+                    if configs[selected_index] == active_config:
                         print(f"\n{Colors.GREEN}{Colors.BOLD}No configuration change needed{Colors.NC}")
                         sys.exit(0)
                     else:
                         print(f"\n{Colors.GREEN}{Colors.BOLD}Configuration applied successfully!{Colors.NC}")
-                        print(f"{Colors.CYAN}Backup saved to: {BACKUP_CONFIG}{Colors.NC}")
+                        print(f"{Colors.CYAN}Backup saved to: {get_backup_config()}{Colors.NC}")
                         sys.exit(0)
                 else:
                     print(f"\n{Colors.RED}Failed to apply configuration{Colors.NC}")
@@ -446,7 +489,8 @@ def main():
                 selected_index = num - 1
                 selected = configs[selected_index]
                 # Special message for current config selection
-                if selected == CURRENT_CONFIG:
+                active_config = get_active_config()
+                if selected == active_config:
                     log_success(f"Selected: {selected.name} (current configuration)")
                     log_info("Press Enter to confirm (no change), or select another number")
                 else:

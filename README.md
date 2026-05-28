@@ -1,6 +1,6 @@
 # OpenCode Configuration Switcher
 
-An interactive Python script for switching between oh-my-opencode configuration files with a user-friendly terminal interface.
+An interactive Python script for switching between oh-my-opencode / oh-my-openagent configuration files with a user-friendly terminal interface.
 
 ## Features
 
@@ -15,7 +15,7 @@ An interactive Python script for switching between oh-my-opencode configuration 
 ## Requirements
 
 - **Python 3.6+** (3.7+ recommended for best performance)
-- **oh-my-opencode** installed with configuration directory at `~/.config/opencode/`
+- **oh-my-opencode** or **oh-my-openagent** installed with configuration directory at `~/.config/opencode/`
 - **Unix-like system** (Linux, macOS, or WSL)
 
 ## Installation
@@ -107,24 +107,25 @@ The script provides an interactive menu with the following commands:
 
 ### How It Works
 
-1. **Configuration Discovery**: The script scans `~/.config/opencode/` for all JSON files matching `oh-my-opencode*.json`
-2. **File Filtering**: It excludes `oh-my-opencode.json` (current active config) and `.BAK` files from the selection list
-3. **Safe Switching**: When you select and apply a configuration:
-   - Current `oh-my-opencode.json` is backed up to `oh-my-opencode.json.BAK` (overwrites existing backup)
-   - Selected file is **copied** (not moved) to `oh-my-opencode.json`
+1. **Configuration Discovery**: The script scans `~/.config/opencode/` for all JSON files matching `oh-my-openagent*.json` or `oh-my-opencode*.json`
+2. **File Filtering**: It excludes the current active config (`oh-my-openagent.json` or `oh-my-opencode.json`) and `.BAK` files from the selection list
+3. **Backup & Apply**: When you select a configuration:
+   - Current active config is backed up to `.BAK` (overwrites existing backup)
+   - Selected file is **copied** (not moved) to the current active config
    - The new configuration becomes immediately active
 
 ## Configuration Directory Structure
 
 ```
 ~/.config/opencode/
-├── oh-my-opencode.json              # Current active configuration (DO NOT EDIT DIRECTLY)
-├── oh-my-opencode.json.BAK          # Backup of previous configuration
-├── oh-my-opencode-default.json      # Default configuration preset
-├── oh-my-opencode_OpenAI-GLM4.7.json # OpenAI + GLM4.7 configuration
-├── oh-my-opencode_OpenAI-Only.json  # OpenAI-only configuration
-├── oh-my-opencode_Custom.json       # Your custom configuration
-└── ... (other configuration files)
+├── oh-my-openagent.json              # Current active configuration (preferred, new name)
+├── oh-my-openagent.json.BAK          # Backup of previous configuration
+├── oh-my-openagent-default.json      # Default configuration preset
+├── oh-my-openagent_OpenAI-GLM4.7.json # OpenAI + GLM4.7 configuration
+├── oh-my-openagent_OpenAI-Only.json  # OpenAI-only configuration
+├── oh-my-openagent_Custom.json       # Your custom configuration
+├── oh-my-opencode.json               # Legacy current active configuration (deprecated)
+└── oh-my-opencode-*.json             # Legacy configuration presets (still supported)
 ```
 
 ## Creating New Configuration Presets
@@ -133,14 +134,12 @@ The script provides an interactive menu with the following commands:
 
 1. Copy your current configuration to a new file:
 ```bash
-cp ~/.config/opencode/oh-my-opencode.json ~/.config/opencode/oh-my-opencode-myconfig.json
-```
+cp ~/.config/opencode/oh-my-openagent.json ~/.config/opencode/oh-my-openagent-myconfig.json
 
-2. Edit the new file with your desired settings:
-```bash
-nano ~/.config/opencode/oh-my-opencode-myconfig.json
-# or use your preferred editor
-vim ~/.config/opencode/oh-my-opencode-myconfig.json
+# Edit your custom configuration
+nano ~/.config/opencode/oh-my-openagent-myconfig.json
+# or
+vim ~/.config/opencode/oh-my-openagent-myconfig.json
 ```
 
 3. Run the switcher to select your new configuration from the menu
@@ -149,7 +148,7 @@ vim ~/.config/opencode/oh-my-opencode-myconfig.json
 
 1. Copy a template configuration:
 ```bash
-cp ~/.config/opencode/oh-my-opencode-default.json ~/.config/opencode/oh-my-opencode-mytemplate.json
+cp ~/.config/opencode/oh-my-openagent-default.json ~/.config/opencode/oh-my-openagent-mytemplate.json
 ```
 
 2. Modify the template to create your custom configuration
@@ -160,10 +159,10 @@ If you need to restore the previous configuration:
 
 ```bash
 # Check available backups
-ls -la ~/.config/opencode/oh-my-opencode*.BAK
+ls -la ~/.config/opencode/oh-my-openagent*.BAK ~/.config/opencode/oh-my-opencode*.BAK
 
-# Restore from backup
-cp ~/.config/opencode/oh-my-opencode.json.BAK ~/.config/opencode/oh-my-opencode.json
+# To restore from backup
+cp ~/.config/opencode/oh-my-openagent.json.BAK ~/.config/opencode/oh-my-openagent.json
 ```
 
 ## Troubleshooting
@@ -176,7 +175,7 @@ cp ~/.config/opencode/oh-my-opencode.json.BAK ~/.config/opencode/oh-my-opencode.
 
 2. **"No configuration files found"**
    - Verify you have configuration files in `~/.config/opencode/`
-   - Files should match pattern: `oh-my-opencode*.json` (excluding current and backup)
+   - Files should match pattern: `oh-my-openagent-*.json` or `oh-my-opencode-*.json` (excluding current and backup)
 
 3. **"Permission denied"**
    - Ensure the script is executable: `chmod +x switch_oh-my-opencode_config.py`
@@ -207,11 +206,11 @@ The script can be integrated into shell scripts for automation:
 ```bash
 #!/bin/bash
 # Example: Apply a specific configuration programmatically
-CONFIG_FILE="oh-my-opencode-custom.json"
+CONFIG_FILE="oh-my-openagent-custom.json"
 CONFIG_PATH="$HOME/.config/opencode/$CONFIG_FILE"
 
 if [ -f "$CONFIG_PATH" ]; then
-    cp "$CONFIG_PATH" "$HOME/.config/opencode/oh-my-opencode.json"
+    cp "$CONFIG_PATH" "$HOME/.config/opencode/oh-my-openagent.json"
     echo "Configuration applied: $CONFIG_FILE"
 else
     echo "Configuration file not found: $CONFIG_PATH"
@@ -230,14 +229,14 @@ Create a management script for your configurations:
 case "$1" in
     "list")
         echo "Available configurations:"
-        ls -la ~/.config/opencode/oh-my-opencode*.json | grep -v "\.BAK$"
+        ls -la ~/.config/opencode/oh-my-openagent*.json ~/.config/opencode/oh-my-opencode*.json | grep -v "\.BAK$"
         ;;
     "backup")
-        cp ~/.config/opencode/oh-my-opencode.json ~/.config/opencode/oh-my-opencode-backup-$(date +%Y%m%d-%H%M%S).json
+        cp ~/.config/opencode/oh-my-openagent.json ~/.config/opencode/oh-my-openagent-backup-$(date +%Y%m%d-%H%M%S).json
         echo "Backup created"
         ;;
     "clean")
-        find ~/.config/opencode/ -name "oh-my-opencode*.BAK" -delete
+        find ~/.config/opencode/ -name "oh-my-openagent*.BAK" -delete -o -name "oh-my-opencode*.BAK" -delete
         echo "Cleaned up backup files"
         ;;
     *)
@@ -274,7 +273,13 @@ To contribute to this project:
 
 ## Version History
 
-- **v1.0.1** (Current):
+- **v1.2.0** (Current):
+  - Added support for `oh-my-openagent*.json` naming convention
+  - Legacy `oh-my-opencode*.json` files remain supported
+  - Auto-detects active config file (prefers openagent over opencode)
+  - Updated documentation for dual-name support
+
+- **v1.1.0**:
   - Added version variable and --version flag
   - Improved version management
   - Enhanced documentation
@@ -290,9 +295,9 @@ To contribute to this project:
 If you encounter any issues or have questions:
 
 1. Check the troubleshooting section above
-2. Review the oh-my-opencode documentation
+2. Review the oh-my-openagent / oh-my-opencode documentation
 3. Open an issue in the project repository
 
 ---
 
-*This script is designed to work with the oh-my-opencode configuration management system. For more information about oh-my-opencode, please refer to the official documentation.*
+*This script is designed to work with the oh-my-openagent and oh-my-opencode configuration management systems. For more information, please refer to the official documentation.*
