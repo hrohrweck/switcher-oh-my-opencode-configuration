@@ -9,7 +9,7 @@ import sys
 import shutil
 import json
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 
 def supports_raw_input() -> bool:
@@ -349,13 +349,13 @@ def display_config_preview(config_path: Path, box: BoxChars):
         input("\nPress Enter to continue...")
 
 
-def display_menu(configs: List[Path], box: BoxChars, selected_index: Optional[int] = None):
+def display_menu(configs: List[Path], box: BoxChars, selected_index: int):
     """Display the configuration selection menu"""
     clear_screen()
 
     print_box_header(
         "OpenCode Configuration Switcher v1.1.0",
-        "Commands: 1-9=select | d#=details | C/Enter=apply | q=quit",
+        "Commands: Up/Down=move | Enter=apply | d=details | q=quit",
         box
     )
 
@@ -363,27 +363,33 @@ def display_menu(configs: List[Path], box: BoxChars, selected_index: Optional[in
     print_sep(box)
 
     # Print header with column alignment
-    print(f"  {'SEL':<4} {'#':<3} {'Filename'}")
+    print(f"  {'#':<3} {'Filename'}")
     print_sep(box)
 
-    # Print numbered list with selection indicator
     for idx, config in enumerate(configs, 1):
-        # Determine selection marker
-        is_selected = (selected_index is not None and idx - 1 == selected_index)
-        if is_selected:
-            sel_marker = f"{Colors.GREEN}[{Colors.BOLD}*{Colors.NC}{Colors.GREEN}]{Colors.NC}"
-        else:
-            sel_marker = "[ ]"
+        is_highlighted = (idx - 1 == selected_index)
 
-        # Build the config name with (current) label if applicable
-        active_config = get_active_config()
-        if idx == 1 and config == active_config:
-            config_name = f"{Colors.GREEN}{config.name}{Colors.NC} {Colors.YELLOW}(current){Colors.NC}"
+        if is_highlighted:
+            # Full-width reverse-video line — suppress ALL Colors.*
+            width = get_terminal_width()
+            lead = "  "
+            avail = width - len(lead)
+            text = f"{idx}) {config.name}"
+            if idx == 1 and config == get_active_config():
+                text += " (current)"
+            # Truncate or pad to fill the row
+            if len(text) > avail:
+                text = text[:avail]
+            else:
+                text = text + ' ' * (avail - len(text))
+            print(f"{lead}\033[7m{text}\033[27m")
         else:
-            config_name = f"{Colors.CYAN}{config.name}{Colors.NC}"
-
-        # Format: [SEL] #) Filename
-        print(f"  {sel_marker:<4} {Colors.BOLD}{idx}){Colors.NC} {config_name}")
+            # Non-highlighted row — keep colors, drop [ ] marker
+            if idx == 1 and config == get_active_config():
+                config_name = f"{Colors.GREEN}{config.name}{Colors.NC} {Colors.YELLOW}(current){Colors.NC}"
+            else:
+                config_name = f"{Colors.CYAN}{config.name}{Colors.NC}"
+            print(f"  {Colors.BOLD}{idx}){Colors.NC} {config_name}")
 
     print_sep(box)
 
@@ -460,7 +466,7 @@ def main():
         sys.exit(1)
 
     # Main menu loop
-    selected_index = None
+    selected_index = 0
 
     while True:
         display_menu(configs, box, selected_index)
