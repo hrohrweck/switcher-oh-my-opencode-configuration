@@ -4,11 +4,11 @@ An interactive Python script for switching between oh-my-opencode / oh-my-openag
 
 ## Features
 
-- **Interactive Menu System**: Colorized terminal UI with numbered selection
-- **Configuration Preview**: View detailed contents of configuration files before applying (`d#` command)
+- **Interactive Menu System**: Colorized terminal UI with arrow-key selection with inverted-line highlight
+- **Configuration Preview**: View detailed contents of configuration files before applying (`d` command)
 - **Safe Operations**: Automatic backup creation before switching configurations
 - **UTF-8 Support**: Smart box drawing characters with ASCII fallback for compatibility
-- **Keyboard Navigation**: Intuitive controls with space/enter for navigation
+- **Keyboard Navigation**: Intuitive controls with Up/Down arrows + inverted-line highlight, and space/enter for navigation
 - **Current Config Indicator**: Clear visual indication of the currently active configuration
 - **Backup Management**: Automatic backup file management with restore capability
 
@@ -97,10 +97,10 @@ The script provides an interactive menu with the following commands:
 
 | Command | Description |
 |---------|-------------|
-| `1-9` | Select a configuration file by number |
-| `d#` | View detailed file contents (e.g., `d1`, `d2`, `d3`) |
+| `Up`/`Down` | Move the highlight between configurations |
+| `Enter` | Apply the highlighted configuration |
+| `d` | View detail of the highlighted configuration |
 | `q` | Quit without making any changes |
-| `Enter` | Apply the selected configuration |
 | `Space` | Navigate through pages in detail view |
 | `b` | Go to previous page in detail view |
 | `Arrow Keys` | Navigate through pages in detail view |
@@ -274,13 +274,16 @@ To contribute to this project:
 ## Version History
 
 - **v1.2.0** (Current):
+  - Arrow-key navigation with inverted-line highlight
+  - Enter applies the highlighted configuration immediately
+  - Numbers removed from menu; `d` opens detail of highlighted item
+  - Non-tty numeric fallback for piped/automated use
   - Added support for `oh-my-openagent*.json` naming convention
   - Legacy `oh-my-opencode*.json` files remain supported
   - Auto-detects active config file (prefers openagent over opencode)
   - Updated documentation for dual-name support
 
 - **v1.1.0**:
-  - Added version variable and --version flag
   - Improved version management
   - Enhanced documentation
 

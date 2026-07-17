@@ -354,7 +354,7 @@ def display_menu(configs: List[Path], box: BoxChars, selected_index: int):
     clear_screen()
 
     print_box_header(
-        "OpenCode Configuration Switcher v1.1.0",
+        "OpenCode Configuration Switcher v1.2.0",
         "Commands: Up/Down=move | Enter=apply | d=details | q=quit",
         box
     )
