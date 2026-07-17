@@ -512,28 +512,28 @@ def main():
                 log_info("Exiting without changes")
                 sys.exit(0)
 
-            try:
-                num = int(user_input)
-                if 1 <= num <= len(configs):
-                    selected_index = num - 1
-                    print()
-                    if apply_config(configs[selected_index]):
-                    if configs[selected_index] == get_active_config():
-                        print(f"\n{Colors.GREEN}{Colors.BOLD}No configuration change needed{Colors.NC}")
-                        sys.exit(0)
+                try:
+                    num = int(user_input)
+                    if 1 <= num <= len(configs):
+                        selected_index = num - 1
+                        print()
+                        if apply_config(configs[selected_index]):
+                            if configs[selected_index] == get_active_config():
+                                print(f"\n{Colors.GREEN}{Colors.BOLD}No configuration change needed{Colors.NC}")
+                                sys.exit(0)
+                            else:
+                                print(f"\n{Colors.GREEN}{Colors.BOLD}Configuration applied successfully!{Colors.NC}")
+                                print(f"{Colors.CYAN}Backup saved to: {get_backup_config()}{Colors.NC}")
+                                sys.exit(0)
+                        else:
+                            print(f"\n{Colors.RED}Failed to apply configuration{Colors.NC}")
+                            input("\nPress Enter to continue...")
                     else:
-                        print(f"\n{Colors.GREEN}{Colors.BOLD}Configuration applied successfully!{Colors.NC}")
-                        print(f"{Colors.CYAN}Backup saved to: {get_backup_config()}{Colors.NC}")
-                        sys.exit(0)
-                    else:
-                        print(f"\n{Colors.RED}Failed to apply configuration{Colors.NC}")
-                        input("\nPress Enter to continue...")
-                else:
-                    log_error(f"Invalid selection: {num} (must be 1-{len(configs)})")
+                        log_error(f"Invalid selection: {num} (must be 1-{len(configs)})")
+                        input("Press Enter to continue...")
+                except ValueError:
+                    log_error(f"Invalid input: {user_input}")
                     input("Press Enter to continue...")
-            except ValueError:
-                log_error(f"Invalid input: {user_input}")
-                input("Press Enter to continue...")
 
 
 
