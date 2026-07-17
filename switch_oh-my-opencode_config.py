@@ -11,6 +11,50 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional
 
+
+def supports_raw_input() -> bool:
+    """Check if raw terminal input (single-key reading) is available."""
+    try:
+        import tty
+        import termios
+        if not sys.stdin.isatty():
+            return False
+        fd = sys.stdin.fileno()
+        termios.tcgetattr(fd)  # raises if not a real terminal
+        return True
+    except Exception:
+        return False
+
+
+def get_key() -> str:
+    """Read a single key from the terminal and return a normalized token."""
+    import tty
+    import termios
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':
+            ch += sys.stdin.read(2)
+            if ch == '\x1b[A':
+                return 'up'
+            elif ch == '\x1b[B':
+                return 'down'
+            elif ch == '\x1b[C' or ch == '\x1b[D':
+                return ''
+            return ''
+        if ch in ('\r', '\n', ' '):
+            return 'enter'
+        if ch == '\x03':
+            return 'ctrlc'
+        if ch == '\x04':
+            return 'ctrld'
+        return ch.lower()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 # Version
 __version__ = "1.2.0"
 
@@ -254,36 +298,23 @@ def display_config_preview(config_path: Path, box: BoxChars):
                 import tty
                 import termios
 
-                def get_key():
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-                    try:
-                        tty.setraw(sys.stdin.fileno())
-                        ch = sys.stdin.read(1)
-                        if ch == '\x1b':  # Escape sequence
-                            # Read the rest of the sequence
-                            ch += sys.stdin.read(2)
-                        return ch
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
                 key = get_key()
 
                 # Handle key input
-                if key.lower() == 'q' or key == '\x1b':  # q or Escape
+                if key in ('q', 'ctrlc', 'ctrld'):  # q, Ctrl-C, or Ctrl-D
                     break
-                elif key == ' ' or key == '\n' or key == '\r':  # Space or Enter
+                elif key == 'enter':  # Enter or Space
                     if current_page < total_pages - 1:
                         current_page += 1
                     else:
                         break  # Exit if on last page
-                elif key.lower() == 'b':  # Previous page
+                elif key == 'b':  # Previous page
                     if current_page > 0:
                         current_page -= 1
-                elif key == '\x1b[A':  # Up arrow
+                elif key == 'up':  # Up arrow
                     if current_page > 0:
                         current_page -= 1
-                elif key == '\x1b[B':  # Down arrow
+                elif key == 'down':  # Down arrow
                     if current_page < total_pages - 1:
                         current_page += 1
 
