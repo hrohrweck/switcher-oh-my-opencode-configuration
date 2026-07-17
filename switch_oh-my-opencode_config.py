@@ -471,21 +471,22 @@ def main():
     while True:
         display_menu(configs, box, selected_index)
 
-        # Get user input
-        try:
-            user_input = input(f"\n{Colors.BOLD}Enter selection:{Colors.NC} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
-            sys.exit(0)
+        if supports_raw_input():
+            # Arrow-key navigation mode (tty available)
+            key = get_key()
 
-        # Handle C or empty input (apply selection)
-        if not user_input or user_input.upper() == 'C':
-            if selected_index is not None:
-                print()  # Blank line for readability
+            if key in ('q', 'ctrlc', 'ctrld'):
+                log_info("Exiting without changes")
+                sys.exit(0)
+            elif key == 'up':
+                selected_index = max(0, selected_index - 1)
+            elif key == 'down':
+                selected_index = min(len(configs) - 1, selected_index + 1)
+            elif key == 'enter':
+                # Apply the highlighted config immediately (one-step)
+                print()
                 if apply_config(configs[selected_index]):
-                    # Check if we actually applied a new config or just showed "no change"
-                    active_config = get_active_config()
-                    if configs[selected_index] == active_config:
+                    if configs[selected_index] == get_active_config():
                         print(f"\n{Colors.GREEN}{Colors.BOLD}No configuration change needed{Colors.NC}")
                         sys.exit(0)
                     else:
@@ -495,51 +496,45 @@ def main():
                 else:
                     print(f"\n{Colors.RED}Failed to apply configuration{Colors.NC}")
                     input("\nPress Enter to continue...")
-            else:
-                log_warning("No configuration selected. Please select a number first.")
-                input("Press Enter to continue...")
-            continue
+            elif key == 'd':
+                display_config_preview(configs[selected_index], box)
+            # Any other key (including '' and stray chars) is ignored — loop redraws
 
-        # Handle quit
-        if user_input.lower() == 'q':
-            log_info("Exiting without changes")
-            sys.exit(0)
-
-        # Handle detail view (d#)
-        if user_input.lower().startswith('d'):
+        else:
+            # Non-tty fallback: numeric input mode
             try:
-                detail_num = int(user_input[1:])
-                if 1 <= detail_num <= len(configs):
-                    display_config_preview(configs[detail_num - 1], box)
+                user_input = input(f"\n{Colors.BOLD}Enter number to apply, or q to quit:{Colors.NC} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
+                sys.exit(0)
+
+            if user_input.lower() == 'q':
+                log_info("Exiting without changes")
+                sys.exit(0)
+
+            try:
+                num = int(user_input)
+                if 1 <= num <= len(configs):
+                    selected_index = num - 1
+                    print()
+                    if apply_config(configs[selected_index]):
+                    if configs[selected_index] == get_active_config():
+                        print(f"\n{Colors.GREEN}{Colors.BOLD}No configuration change needed{Colors.NC}")
+                        sys.exit(0)
+                    else:
+                        print(f"\n{Colors.GREEN}{Colors.BOLD}Configuration applied successfully!{Colors.NC}")
+                        print(f"{Colors.CYAN}Backup saved to: {get_backup_config()}{Colors.NC}")
+                        sys.exit(0)
+                    else:
+                        print(f"\n{Colors.RED}Failed to apply configuration{Colors.NC}")
+                        input("\nPress Enter to continue...")
                 else:
-                    log_error(f"Invalid detail number: {detail_num}")
+                    log_error(f"Invalid selection: {num} (must be 1-{len(configs)})")
                     input("Press Enter to continue...")
             except ValueError:
-                log_error(f"Invalid detail command: {user_input}")
+                log_error(f"Invalid input: {user_input}")
                 input("Press Enter to continue...")
-            continue
 
-        # Handle number selection
-        try:
-            num = int(user_input)
-            if 1 <= num <= len(configs):
-                selected_index = num - 1
-                selected = configs[selected_index]
-                # Special message for current config selection
-                active_config = get_active_config()
-                if selected == active_config:
-                    log_success(f"Selected: {selected.name} (current configuration)")
-                    log_info("Press Enter to confirm (no change), or select another number")
-                else:
-                    log_success(f"Selected: {selected.name}")
-                    log_info("Press Enter to apply, or select another number")
-            else:
-                log_error(f"Invalid selection: {num} (must be 1-{len(configs)})")
-                input("Press Enter to continue...")
-        except ValueError:
-            log_error(f"Invalid input: {user_input}")
-            log_info("Valid commands: number, d#, C/Enter to apply, q to quit")
-            input("Press Enter to continue...")
 
 
 if __name__ == "__main__":
