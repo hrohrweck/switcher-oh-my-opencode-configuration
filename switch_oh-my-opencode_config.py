@@ -9,7 +9,51 @@ import sys
 import shutil
 import json
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
+
+
+def supports_raw_input() -> bool:
+    """Check if raw terminal input (single-key reading) is available."""
+    try:
+        import tty
+        import termios
+        if not sys.stdin.isatty():
+            return False
+        fd = sys.stdin.fileno()
+        termios.tcgetattr(fd)  # raises if not a real terminal
+        return True
+    except Exception:
+        return False
+
+
+def get_key() -> str:
+    """Read a single key from the terminal and return a normalized token."""
+    import tty
+    import termios
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':
+            ch += sys.stdin.read(2)
+            if ch == '\x1b[A':
+                return 'up'
+            elif ch == '\x1b[B':
+                return 'down'
+            elif ch == '\x1b[C' or ch == '\x1b[D':
+                return ''
+            return ''
+        if ch in ('\r', '\n', ' '):
+            return 'enter'
+        if ch == '\x03':
+            return 'ctrlc'
+        if ch == '\x04':
+            return 'ctrld'
+        return ch.lower()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
 
 # Version
 __version__ = "1.2.0"
@@ -254,36 +298,23 @@ def display_config_preview(config_path: Path, box: BoxChars):
                 import tty
                 import termios
 
-                def get_key():
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-                    try:
-                        tty.setraw(sys.stdin.fileno())
-                        ch = sys.stdin.read(1)
-                        if ch == '\x1b':  # Escape sequence
-                            # Read the rest of the sequence
-                            ch += sys.stdin.read(2)
-                        return ch
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
                 key = get_key()
 
                 # Handle key input
-                if key.lower() == 'q' or key == '\x1b':  # q or Escape
+                if key in ('q', 'ctrlc', 'ctrld'):  # q, Ctrl-C, or Ctrl-D
                     break
-                elif key == ' ' or key == '\n' or key == '\r':  # Space or Enter
+                elif key == 'enter':  # Enter or Space
                     if current_page < total_pages - 1:
                         current_page += 1
                     else:
                         break  # Exit if on last page
-                elif key.lower() == 'b':  # Previous page
+                elif key == 'b':  # Previous page
                     if current_page > 0:
                         current_page -= 1
-                elif key == '\x1b[A':  # Up arrow
+                elif key == 'up':  # Up arrow
                     if current_page > 0:
                         current_page -= 1
-                elif key == '\x1b[B':  # Down arrow
+                elif key == 'down':  # Down arrow
                     if current_page < total_pages - 1:
                         current_page += 1
 
@@ -318,13 +349,13 @@ def display_config_preview(config_path: Path, box: BoxChars):
         input("\nPress Enter to continue...")
 
 
-def display_menu(configs: List[Path], box: BoxChars, selected_index: Optional[int] = None):
+def display_menu(configs: List[Path], box: BoxChars, selected_index: int):
     """Display the configuration selection menu"""
     clear_screen()
 
     print_box_header(
-        "OpenCode Configuration Switcher v1.1.0",
-        "Commands: 1-9=select | d#=details | C/Enter=apply | q=quit",
+        "OpenCode Configuration Switcher v1.2.0",
+        "Commands: Up/Down=move | Enter=apply | d=details | q=quit",
         box
     )
 
@@ -332,27 +363,33 @@ def display_menu(configs: List[Path], box: BoxChars, selected_index: Optional[in
     print_sep(box)
 
     # Print header with column alignment
-    print(f"  {'SEL':<4} {'#':<3} {'Filename'}")
+    print(f"  {'#':<3} {'Filename'}")
     print_sep(box)
 
-    # Print numbered list with selection indicator
     for idx, config in enumerate(configs, 1):
-        # Determine selection marker
-        is_selected = (selected_index is not None and idx - 1 == selected_index)
-        if is_selected:
-            sel_marker = f"{Colors.GREEN}[{Colors.BOLD}*{Colors.NC}{Colors.GREEN}]{Colors.NC}"
-        else:
-            sel_marker = "[ ]"
+        is_highlighted = (idx - 1 == selected_index)
 
-        # Build the config name with (current) label if applicable
-        active_config = get_active_config()
-        if idx == 1 and config == active_config:
-            config_name = f"{Colors.GREEN}{config.name}{Colors.NC} {Colors.YELLOW}(current){Colors.NC}"
+        if is_highlighted:
+            # Full-width reverse-video line — suppress ALL Colors.*
+            width = get_terminal_width()
+            lead = "  "
+            avail = width - len(lead)
+            text = f"{idx}) {config.name}"
+            if idx == 1 and config == get_active_config():
+                text += " (current)"
+            # Truncate or pad to fill the row
+            if len(text) > avail:
+                text = text[:avail]
+            else:
+                text = text + ' ' * (avail - len(text))
+            print(f"{lead}\033[7m{text}\033[27m")
         else:
-            config_name = f"{Colors.CYAN}{config.name}{Colors.NC}"
-
-        # Format: [SEL] #) Filename
-        print(f"  {sel_marker:<4} {Colors.BOLD}{idx}){Colors.NC} {config_name}")
+            # Non-highlighted row — keep colors, drop [ ] marker
+            if idx == 1 and config == get_active_config():
+                config_name = f"{Colors.GREEN}{config.name}{Colors.NC} {Colors.YELLOW}(current){Colors.NC}"
+            else:
+                config_name = f"{Colors.CYAN}{config.name}{Colors.NC}"
+            print(f"  {Colors.BOLD}{idx}){Colors.NC} {config_name}")
 
     print_sep(box)
 
@@ -429,26 +466,27 @@ def main():
         sys.exit(1)
 
     # Main menu loop
-    selected_index = None
+    selected_index = 0
 
     while True:
         display_menu(configs, box, selected_index)
 
-        # Get user input
-        try:
-            user_input = input(f"\n{Colors.BOLD}Enter selection:{Colors.NC} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
-            sys.exit(0)
+        if supports_raw_input():
+            # Arrow-key navigation mode (tty available)
+            key = get_key()
 
-        # Handle C or empty input (apply selection)
-        if not user_input or user_input.upper() == 'C':
-            if selected_index is not None:
-                print()  # Blank line for readability
+            if key in ('q', 'ctrlc', 'ctrld'):
+                log_info("Exiting without changes")
+                sys.exit(0)
+            elif key == 'up':
+                selected_index = max(0, selected_index - 1)
+            elif key == 'down':
+                selected_index = min(len(configs) - 1, selected_index + 1)
+            elif key == 'enter':
+                # Apply the highlighted config immediately (one-step)
+                print()
                 if apply_config(configs[selected_index]):
-                    # Check if we actually applied a new config or just showed "no change"
-                    active_config = get_active_config()
-                    if configs[selected_index] == active_config:
+                    if configs[selected_index] == get_active_config():
                         print(f"\n{Colors.GREEN}{Colors.BOLD}No configuration change needed{Colors.NC}")
                         sys.exit(0)
                     else:
@@ -458,51 +496,45 @@ def main():
                 else:
                     print(f"\n{Colors.RED}Failed to apply configuration{Colors.NC}")
                     input("\nPress Enter to continue...")
-            else:
-                log_warning("No configuration selected. Please select a number first.")
-                input("Press Enter to continue...")
-            continue
+            elif key == 'd':
+                display_config_preview(configs[selected_index], box)
+            # Any other key (including '' and stray chars) is ignored — loop redraws
 
-        # Handle quit
-        if user_input.lower() == 'q':
-            log_info("Exiting without changes")
-            sys.exit(0)
-
-        # Handle detail view (d#)
-        if user_input.lower().startswith('d'):
+        else:
+            # Non-tty fallback: numeric input mode
             try:
-                detail_num = int(user_input[1:])
-                if 1 <= detail_num <= len(configs):
-                    display_config_preview(configs[detail_num - 1], box)
-                else:
-                    log_error(f"Invalid detail number: {detail_num}")
-                    input("Press Enter to continue...")
-            except ValueError:
-                log_error(f"Invalid detail command: {user_input}")
-                input("Press Enter to continue...")
-            continue
+                user_input = input(f"\n{Colors.BOLD}Enter number to apply, or q to quit:{Colors.NC} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
+                sys.exit(0)
 
-        # Handle number selection
-        try:
-            num = int(user_input)
-            if 1 <= num <= len(configs):
-                selected_index = num - 1
-                selected = configs[selected_index]
-                # Special message for current config selection
-                active_config = get_active_config()
-                if selected == active_config:
-                    log_success(f"Selected: {selected.name} (current configuration)")
-                    log_info("Press Enter to confirm (no change), or select another number")
-                else:
-                    log_success(f"Selected: {selected.name}")
-                    log_info("Press Enter to apply, or select another number")
-            else:
-                log_error(f"Invalid selection: {num} (must be 1-{len(configs)})")
-                input("Press Enter to continue...")
-        except ValueError:
-            log_error(f"Invalid input: {user_input}")
-            log_info("Valid commands: number, d#, C/Enter to apply, q to quit")
-            input("Press Enter to continue...")
+            if user_input.lower() == 'q':
+                log_info("Exiting without changes")
+                sys.exit(0)
+
+                try:
+                    num = int(user_input)
+                    if 1 <= num <= len(configs):
+                        selected_index = num - 1
+                        print()
+                        if apply_config(configs[selected_index]):
+                            if configs[selected_index] == get_active_config():
+                                print(f"\n{Colors.GREEN}{Colors.BOLD}No configuration change needed{Colors.NC}")
+                                sys.exit(0)
+                            else:
+                                print(f"\n{Colors.GREEN}{Colors.BOLD}Configuration applied successfully!{Colors.NC}")
+                                print(f"{Colors.CYAN}Backup saved to: {get_backup_config()}{Colors.NC}")
+                                sys.exit(0)
+                        else:
+                            print(f"\n{Colors.RED}Failed to apply configuration{Colors.NC}")
+                            input("\nPress Enter to continue...")
+                    else:
+                        log_error(f"Invalid selection: {num} (must be 1-{len(configs)})")
+                        input("Press Enter to continue...")
+                except ValueError:
+                    log_error(f"Invalid input: {user_input}")
+                    input("Press Enter to continue...")
+
 
 
 if __name__ == "__main__":
