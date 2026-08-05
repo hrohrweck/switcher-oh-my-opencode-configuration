@@ -603,7 +603,7 @@ Deliver a safe, responsive full-screen configuration selector whose highlighted 
 
   **Commit**: YES | Message: `feat(cli): add terminal and plain selectors` | Files: `src/opencode_config_switcher/cli.py`, `src/opencode_config_switcher/__main__.py`, `tests/test_cli.py`
 
-- [ ] 9. Prove real curses behavior through PTY and visual regression scenarios
+- [x] 9. Prove real curses behavior through PTY and visual regression scenarios
 
   **What to do**:
   - Use Task 3's harness and temporary HOME/config trees to run `PYTHONPATH=src python3.11 -m opencode_config_switcher` under `TERM=xterm-256color`.
@@ -664,7 +664,7 @@ Deliver a safe, responsive full-screen configuration selector whose highlighted 
 
   **Commit**: YES | Message: `test(tui): cover real terminal interaction` | Files: `tests/test_tui_pty.py`, `tests/pty_harness.py`, `tests/fixtures/failing_tui_entry.py`, `tests/fixtures/ascii_tui_entry.py`, `tests/fixtures/*.json`
 
-- [ ] 10. Verify installed commands and complete the single-file-to-package migration
+- [x] 10. Verify installed commands and complete the single-file-to-package migration
 
   **What to do**:
   - Add an installation test that creates a temporary Python 3.11 venv, runs `python -m ensurepip --upgrade`, and asserts bundled `setuptools` is at least 61 before proceeding. Set `PIP_NO_INDEX=1` and install the repository with `python -m pip install --no-build-isolation --no-deps .`; if the local bootstrap cannot satisfy setuptools>=61, fail with the exact prerequisite rather than contacting a package index.

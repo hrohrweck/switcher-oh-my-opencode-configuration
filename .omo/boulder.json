@@ -8,7 +8,7 @@
       "plan_name": "full-screen-config-selector-tui",
       "status": "active",
       "started_at": "2026-08-05T09:40:43.771Z",
-      "updated_at": "2026-08-05T10:33:26.030Z",
+      "updated_at": "2026-08-05T10:40:16.287Z",
       "session_ids": [
         "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y"
       ],
@@ -36,9 +36,11 @@
           "task_title": "Prove real curses behavior through PTY and visual regression scenarios",
           "session_id": "opencode:ses_02e87e190fferMqMBRqvQuwWCR",
           "agent": "oracle",
-          "updated_at": "2026-08-05T10:33:26.031Z",
+          "updated_at": "2026-08-05T10:40:16.287Z",
           "started_at": "2026-08-05T10:33:26.031Z",
-          "status": "running"
+          "status": "completed",
+          "ended_at": "2026-08-05T10:40:16.287Z",
+          "elapsed_ms": 410256
         }
       }
     }
@@ -46,7 +48,7 @@
   "active_plan": "/Users/hrohrweck/Nextcloud/source/private/switcher-oh-my-opencode-configuration/.omo/plans/full-screen-config-selector-tui.md",
   "started_at": "2026-08-05T09:40:43.771Z",
   "status": "active",
-  "updated_at": "2026-08-05T10:33:26.030Z",
+  "updated_at": "2026-08-05T10:40:16.287Z",
   "session_ids": [
     "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y"
   ],
@@ -74,9 +76,11 @@
       "task_title": "Prove real curses behavior through PTY and visual regression scenarios",
       "session_id": "opencode:ses_02e87e190fferMqMBRqvQuwWCR",
       "agent": "oracle",
-      "updated_at": "2026-08-05T10:33:26.031Z",
+      "updated_at": "2026-08-05T10:40:16.287Z",
       "started_at": "2026-08-05T10:33:26.031Z",
-      "status": "running"
+      "status": "completed",
+      "ended_at": "2026-08-05T10:40:16.287Z",
+      "elapsed_ms": 410256
     }
   },
   "agent": "atlas"
