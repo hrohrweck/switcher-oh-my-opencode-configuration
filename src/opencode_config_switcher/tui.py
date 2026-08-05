@@ -1,14 +1,20 @@
 """Pure TUI layout, state transitions, and structured formatting.
 
-No curses — all functions are deterministic and testable without a terminal.
+Also provides the curses renderer shell and typed result contracts.
 """
 
+import curses
 import json
+import locale
+import os
+import signal
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from typing import Callable
 
 from opencode_config_switcher.config import ConfigSummary, ModelSpec
+from opencode_config_switcher.switching import ApplyResult, ApplyStatus
 
 
 # ── display-width helpers ──────────────────────────────────────────
@@ -305,3 +311,371 @@ def format_overlay(raw_text: str, width: int) -> list[str]:
     """Format raw JSON text for the overlay pane (vertical scroll only)."""
     lines = raw_text.splitlines()
     return [truncate_display(line, width) for line in lines]
+
+
+# ── TUI result contracts ──────────────────────────────────────────
+
+class TuiOutcome(str, Enum):
+    QUIT = "QUIT"
+    APPLIED = "APPLIED"
+    NOOP = "NOOP"
+    TERMINATED = "TERMINATED"
+    FATAL = "FATAL"
+
+
+@dataclass(frozen=True)
+class TuiResult:
+    outcome: TuiOutcome
+    apply_result: ApplyResult | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    signal_number: int | None = None
+
+
+# ── curses renderer ───────────────────────────────────────────────
+
+_ApplyFn = Callable[[object, object, object], ApplyResult]
+
+
+def _safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
+    """Write *text* at (y, x) without triggering curses.error on overflow."""
+    max_y, max_x = win.getmaxyx()
+    if y < 0 or y >= max_y or x >= max_x:
+        return
+    avail = max_x - x
+    display = truncate_display(text, avail)
+    if y == max_y - 1 and x + display_width(display) >= max_x:
+        display = truncate_display(text, avail - 1)
+    try:
+        win.addstr(y, x, display, attr)
+    except curses.error:
+        pass
+
+
+def _init_colors() -> None:
+    """Initialize color pairs; degrade gracefully when unavailable."""
+    if not curses.has_colors():
+        return
+    curses.start_color()
+    try:
+        curses.use_default_colors()
+    except curses.error:
+        pass
+    curses.init_pair(1, curses.COLOR_CYAN, -1)
+    curses.init_pair(2, curses.COLOR_GREEN, -1)
+    curses.init_pair(3, curses.COLOR_RED, -1)
+    curses.init_pair(4, curses.COLOR_YELLOW, -1)
+
+
+def _color_attrs() -> dict[str, int]:
+    """Return attribute dict, honoring NO_COLOR."""
+    no_color = os.environ.get("NO_COLOR") is not None
+    if no_color or not curses.has_colors():
+        return {
+            "cyan": curses.A_BOLD,
+            "green": curses.A_BOLD,
+            "red": curses.A_BOLD,
+            "yellow": curses.A_BOLD,
+            "bold": curses.A_BOLD,
+            "reverse": curses.A_REVERSE,
+            "normal": 0,
+        }
+    return {
+        "cyan": curses.color_pair(1),
+        "green": curses.color_pair(2),
+        "red": curses.color_pair(3),
+        "yellow": curses.color_pair(4),
+        "bold": curses.A_BOLD,
+        "reverse": curses.A_REVERSE,
+        "normal": 0,
+    }
+
+
+# -- injection seam for unit-testing border drawing
+_draw_border = None
+
+
+def _draw_acs_border(win) -> None:
+    """Draw border with ACS chars; fall back to ASCII on failure."""
+    try:
+        win.border(
+            curses.ACS_VLINE, curses.ACS_VLINE,
+            curses.ACS_HLINE, curses.ACS_HLINE,
+            curses.ACS_ULCORNER, curses.ACS_URCORNER,
+            curses.ACS_LLCORNER, curses.ACS_LRCORNER,
+        )
+    except (curses.error, AttributeError):
+        _draw_ascii_border(win)
+
+
+def _draw_ascii_border(win) -> None:
+    max_y, max_x = win.getmaxyx()
+    _safe_addstr(win, 0, 0, "+" + "-" * (max_x - 2) + "+")
+    for y in range(1, max_y - 1):
+        _safe_addstr(win, y, 0, "|")
+        _safe_addstr(win, y, max_x - 1, "|")
+    if max_y > 1:
+        _safe_addstr(win, max_y - 1, 0, "+" + "-" * (max_x - 2) + "+")
+
+
+def run_tui(configs: list[ConfigSummary],
+            apply_fn: _ApplyFn) -> TuiResult:
+    """Launch the full-screen curses selector and return a TuiResult.
+
+    Must be called when stdin/stdout are TTYs.  Handles resize,
+    colors, signals, and terminal cleanup automatically.
+    """
+    locale.setlocale(locale.LC_ALL, "")
+
+    # Signal cleanup — temporary handlers
+    old_handlers: dict[int, object] = {}
+    sig_result: list[tuple[int, str] | None] = [None]
+
+    def _make_handler(sig_num: int, name: str):
+        def handler(_signum, _frame):
+            sig_result[0] = (sig_num, name)
+        return handler
+
+    for sig_num, name in ((signal.SIGHUP, "SIGHUP"),
+                          (signal.SIGTERM, "SIGTERM")):
+        try:
+            old_handlers[sig_num] = signal.signal(
+                sig_num, _make_handler(sig_num, name))
+        except Exception:
+            pass
+
+    def _inner(stdscr) -> TuiResult:
+        curses.curs_set(0)
+        _init_colors()
+        attrs = _color_attrs()
+        stdscr.keypad(True)
+
+        state = AppState(config_count=len(configs))
+        state.clamp()
+
+        while True:
+            # Check signal result
+            if sig_result[0] is not None:
+                sig_num, sig_name = sig_result[0]
+                return TuiResult(
+                    TuiOutcome.TERMINATED,
+                    signal_number=sig_num)
+
+            max_y, max_x = stdscr.getmaxyx()
+            state.layout = compute_layout(max_x, max_y)
+            stdscr.clear()
+
+            if state.layout == LayoutMode.TOO_SMALL:
+                _safe_addstr(stdscr, max_y // 2, max_x // 2 - 10,
+                             f"Terminal too small ({max_x}x{max_y}). "
+                             f"Need 40x12 minimum.",
+                             attrs["red"])
+                footer = "q/Ctrl-C quit"
+                _safe_addstr(stdscr, max_y - 1, 0,
+                             footer, attrs["bold"])
+                stdscr.refresh()
+
+                key = stdscr.getch()
+                if key == ord("q"):
+                    return TuiResult(TuiOutcome.QUIT)
+                if key == curses.KEY_RESIZE:
+                    curses.update_lines_cols()
+                    continue
+                continue
+
+            # Build menu list
+            menu = []
+            for i, cfg in enumerate(configs):
+                markers = ""
+                if cfg.file.is_current:
+                    markers += " [current]"
+                if not cfg.is_valid:
+                    markers += " [invalid]"
+                menu.append((cfg.file.name, markers, i))
+
+            # Layout calculations
+            if state.layout == LayoutMode.WIDE:
+                lw = left_width(max_x)
+                detail_w = max_x - lw - 1  # divider column
+            else:
+                lw = max_x
+                detail_w = max_x
+
+            visible_menu = max(0, max_y - HEADER_ROWS - FOOTER_ROWS)
+            visible_details = max(0, max_y - HEADER_ROWS - FOOTER_ROWS)
+
+            # Header
+            _safe_addstr(stdscr, 0, 0,
+                         "OpenCode Configuration Switcher v2.0.0",
+                         attrs["cyan"] | attrs["bold"])
+            _safe_addstr(stdscr, 1, 0,
+                         "─" * (max_x - 1), attrs["cyan"])
+            if state.layout == LayoutMode.WIDE:
+                _safe_addstr(stdscr, 2, 0,
+                             " Configurations" + " " * (lw - 16)
+                             + "│ Details",
+                             attrs["bold"])
+            else:
+                mode_label = (" MENU" if state.narrow_pane == NarrowPane.MENU
+                              else " DETAILS")
+                _safe_addstr(stdscr, 2, 0,
+                             f" [{mode_label}]  Tab to switch",
+                             attrs["bold"])
+
+            # Content
+            if state.layout == LayoutMode.WIDE:
+                # Menu (left)
+                for r in range(visible_menu):
+                    idx = state.menu_offset + r
+                    if idx >= len(menu):
+                        break
+                    name, markers, cfg_i = menu[idx]
+                    is_sel = cfg_i == state.selected_idx
+                    text = (f" {cfg_i + 1}) {name}{markers}")
+                    attr = attrs["reverse"] if is_sel else attrs["normal"]
+                    if is_sel:
+                        text = text.ljust(lw)
+                    _safe_addstr(stdscr, HEADER_ROWS + r, 0, text, attr)
+
+                # Divider
+                for y in range(HEADER_ROWS, max_y - FOOTER_ROWS):
+                    _safe_addstr(stdscr, y, lw, "│", attrs["cyan"])
+
+                # Details (right)
+                if state.selected_idx < len(configs):
+                    selected = configs[state.selected_idx]
+                    d_lines = format_details(selected, detail_w - 1)
+                    for r in range(visible_details):
+                        dl_idx = state.detail_offset + r
+                        if dl_idx >= len(d_lines):
+                            break
+                        _safe_addstr(stdscr, HEADER_ROWS + r,
+                                     lw + 1,
+                                     d_lines[dl_idx], attrs["normal"])
+
+            else:  # NARROW
+                if state.narrow_pane == NarrowPane.MENU:
+                    for r in range(visible_menu):
+                        idx = state.menu_offset + r
+                        if idx >= len(menu):
+                            break
+                        name, markers, cfg_i = menu[idx]
+                        is_sel = cfg_i == state.selected_idx
+                        text = (f" {cfg_i + 1}) {name}{markers}")
+                        attr = attrs["reverse"] if is_sel else attrs["normal"]
+                        _safe_addstr(stdscr, HEADER_ROWS + r, 0, text, attr)
+                else:  # DETAILS
+                    if state.selected_idx < len(configs):
+                        selected = configs[state.selected_idx]
+                        d_lines = format_details(selected, detail_w)
+                        for r in range(visible_details):
+                            dl_idx = state.detail_offset + r
+                            if dl_idx >= len(d_lines):
+                                break
+                            _safe_addstr(stdscr, HEADER_ROWS + r, 0,
+                                         d_lines[dl_idx], attrs["normal"])
+
+            # Footer
+            footer_y = max_y - 2
+            if state.overlay_open:
+                footer = "Overlay: Up/Down scroll  d/q close"
+            elif state.layout == LayoutMode.WIDE:
+                footer = (f"Up/Down: select  PgUp/PgDn: scroll  "
+                          f"d: raw JSON  Enter: apply  q: quit")
+            else:
+                if state.narrow_pane == NarrowPane.MENU:
+                    footer = (f"Up/Down: select  Tab: Details  "
+                              f"d: raw JSON  Enter: apply  q: quit")
+                else:
+                    footer = (f"Up/Down/PgUp/PgDn: scroll  "
+                              f"Tab: Menu  Enter: apply  q: quit")
+            if state.status:
+                footer = f"{state.status}  |  {footer}"
+            _safe_addstr(stdscr, footer_y, 0, footer, attrs["bold"])
+            _safe_addstr(stdscr, max_y - 1, 0,
+                         "─" * (max_x - 1), attrs["cyan"])
+
+            # Overlay
+            if state.overlay_open and state.selected_idx < len(configs):
+                raw = configs[state.selected_idx].file.raw_text
+                if raw:
+                    ov_lines = format_overlay(raw, max_x)
+                    ov_visible = max_y - 4
+                    for r in range(ov_visible):
+                        oi = state.overlay_offset + r
+                        if oi >= len(ov_lines):
+                            break
+                        _safe_addstr(stdscr, 2 + r, 0,
+                                     ov_lines[oi], attrs["normal"])
+
+            stdscr.refresh()
+
+            # Input
+            key = stdscr.getch()
+            if key == ord("q"):
+                return TuiResult(TuiOutcome.QUIT)
+            if key == ord("\x04"):  # Ctrl-D
+                return TuiResult(TuiOutcome.QUIT)
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                state.clamp()
+                continue
+
+            # Map curses constants to our string keys
+            key_map = {
+                curses.KEY_UP: "up",
+                curses.KEY_DOWN: "down",
+                curses.KEY_PPAGE: "pageup",
+                curses.KEY_NPAGE: "pagedown",
+                ord("\t"): "tab",
+                ord("d"): "d",
+                ord("D"): "d",
+                10: "enter",  # Enter
+                13: "enter",  # Enter
+                ord(" "): " ",
+            }
+            key_str = key_map.get(key)
+            if key_str is None:
+                continue
+
+            intent = handle_key(state, key_str)
+            if intent == "quit":
+                return TuiResult(TuiOutcome.QUIT)
+            if intent == "apply":
+                if state.selected_idx < len(configs):
+                    selected = configs[state.selected_idx]
+                    result = apply_fn(
+                        selected.file.path,
+                        is_valid=selected.is_valid,
+                        error_reason=selected.error)
+                    if result.status == ApplyStatus.BLOCKED:
+                        state.status = result.message
+                    elif result.status == ApplyStatus.FAILED:
+                        state.status = result.message
+                    elif result.status == ApplyStatus.NOOP:
+                        return TuiResult(TuiOutcome.NOOP,
+                                         apply_result=result)
+                    else:
+                        return TuiResult(TuiOutcome.APPLIED,
+                                         apply_result=result)
+            state.clamp()
+
+    try:
+        result = curses.wrapper(_inner)
+    except KeyboardInterrupt:
+        result = TuiResult(TuiOutcome.QUIT)
+    except Exception as exc:
+        result = TuiResult(
+            TuiOutcome.FATAL,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+
+    # Restore signal handlers
+    for sig_num, old_handler in old_handlers.items():
+        try:
+            signal.signal(sig_num, old_handler)
+        except Exception:
+            pass
+
+    return result
