@@ -96,8 +96,7 @@ class AppState:
     menu_offset: int = 0
     detail_offset: int = 0
     narrow_pane: NarrowPane = NarrowPane.MENU
-    overlay_open: bool = False
-    overlay_offset: int = 0
+    detail_raw: bool = False
     status: str | None = None
     layout: LayoutMode = LayoutMode.NARROW
 
@@ -107,14 +106,12 @@ class AppState:
             self.selected_idx = 0
             self.menu_offset = 0
             self.detail_offset = 0
-            self.overlay_offset = 0
             return
         self.selected_idx = max(0, min(
             self.selected_idx, self.config_count - 1))
         self.menu_offset = max(0, min(
             self.menu_offset, self.config_count - 1))
         self.detail_offset = max(0, self.detail_offset)
-        self.overlay_offset = max(0, self.overlay_offset)
 
 
 # ── key transitions (pure) ─────────────────────────────────────────
@@ -125,22 +122,6 @@ def handle_key(state: AppState, key: str) -> str | None:
     Valid intents: 'quit', 'apply'.
     """
     lm = state.layout
-
-    # Overlay mode — check BEFORE universal quit keys (exclude TOO_SMALL)
-    if state.overlay_open and lm != LayoutMode.TOO_SMALL:
-        if key in ("q", "d"):
-            state.overlay_open = False
-            state.overlay_offset = 0
-            return None
-        if key == "up":
-            state.overlay_offset = max(0, state.overlay_offset - 1)
-        elif key == "down":
-            state.overlay_offset += 1
-        elif key == "pageup":
-            state.overlay_offset = max(0, state.overlay_offset - 10)
-        elif key == "pagedown":
-            state.overlay_offset += 10
-        return None
 
     # Universal quit keys
     if key in ("q", "ctrlc", "ctrld"):
@@ -164,8 +145,8 @@ def handle_key(state: AppState, key: str) -> str | None:
         elif key == "pagedown":
             state.detail_offset += 5
         elif key == "d":
-            state.overlay_open = True
-            state.overlay_offset = 0
+            state.detail_raw = not state.detail_raw
+            state.detail_offset = 0
         elif key == "enter":
             return "apply"
         elif key == "tab":
@@ -184,8 +165,9 @@ def handle_key(state: AppState, key: str) -> str | None:
         elif key == "tab":
             state.narrow_pane = NarrowPane.DETAILS
         elif key == "d":
-            state.overlay_open = True
-            state.overlay_offset = 0
+            state.detail_raw = not state.detail_raw
+            state.detail_offset = 0
+            state.narrow_pane = NarrowPane.DETAILS
         elif key == "enter":
             return "apply"
         elif key in ("pageup", "pagedown"):
@@ -202,8 +184,8 @@ def handle_key(state: AppState, key: str) -> str | None:
         elif key == "tab":
             state.narrow_pane = NarrowPane.MENU
         elif key == "d":
-            state.overlay_open = True
-            state.overlay_offset = 0
+            state.detail_raw = not state.detail_raw
+            state.detail_offset = 0
         elif key == "enter":
             return "apply"
 
@@ -309,6 +291,21 @@ def format_overlay(raw_text: str, width: int) -> list[str]:
     """Format raw JSON text for the overlay pane (vertical scroll only)."""
     lines = raw_text.splitlines()
     return [truncate_display(line, width) for line in lines]
+
+
+# ── display helpers ────────────────────────────────────────────────
+
+_DISPLAY_PREFIXES = ("oh-my-openagent-", "oh-my-opencode-")
+
+
+def display_config_name(name: str) -> str:
+    for prefix in _DISPLAY_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    if name.endswith(".json"):
+        name = name[:-len(".json")]
+    return name
 
 
 # ── TUI result contracts ──────────────────────────────────────────
@@ -489,7 +486,8 @@ def run_tui(configs: list[ConfigSummary],
                     markers += " [current]"
                 if not cfg.is_valid:
                     markers += " [invalid]"
-                menu.append((cfg.file.name, markers, i))
+                menu.append((display_config_name(cfg.file.name),
+                             markers, i))
 
             # Layout calculations
             if state.layout == LayoutMode.WIDE:
@@ -509,13 +507,19 @@ def run_tui(configs: list[ConfigSummary],
             _safe_addstr(stdscr, 1, 0,
                          "─" * (max_x - 1), attrs["cyan"])
             if state.layout == LayoutMode.WIDE:
+                detail_label = (" Details (raw)" if state.detail_raw
+                                else " Details")
                 _safe_addstr(stdscr, 2, 0,
                              " Configurations" + " " * (lw - 16)
-                             + "│ Details",
+                             + "│" + detail_label,
                              attrs["bold"])
             else:
-                mode_label = (" MENU" if state.narrow_pane == NarrowPane.MENU
-                              else " DETAILS")
+                if state.narrow_pane == NarrowPane.MENU:
+                    mode_label = " MENU"
+                elif state.detail_raw:
+                    mode_label = " DETAILS (raw)"
+                else:
+                    mode_label = " DETAILS"
                 _safe_addstr(stdscr, 2, 0,
                              f" [{mode_label}]  Tab to switch",
                              attrs["bold"])
@@ -529,7 +533,7 @@ def run_tui(configs: list[ConfigSummary],
                         break
                     name, markers, cfg_i = menu[idx]
                     is_sel = cfg_i == state.selected_idx
-                    text = (f" {cfg_i + 1}) {name}{markers}")
+                    text = (f" {name}{markers}")
                     attr = attrs["reverse"] if is_sel else attrs["normal"]
                     if is_sel:
                         text = text.ljust(lw)
@@ -542,7 +546,11 @@ def run_tui(configs: list[ConfigSummary],
                 # Details (right)
                 if state.selected_idx < len(configs):
                     selected = configs[state.selected_idx]
-                    d_lines = format_details(selected, detail_w - 1)
+                    if state.detail_raw and selected.file.raw_text:
+                        d_lines = format_overlay(
+                            selected.file.raw_text, detail_w - 1)
+                    else:
+                        d_lines = format_details(selected, detail_w - 1)
                     for r in range(visible_details):
                         dl_idx = state.detail_offset + r
                         if dl_idx >= len(d_lines):
@@ -559,13 +567,20 @@ def run_tui(configs: list[ConfigSummary],
                             break
                         name, markers, cfg_i = menu[idx]
                         is_sel = cfg_i == state.selected_idx
-                        text = (f" {cfg_i + 1}) {name}{markers}")
+                        text = (f" {name}{markers}")
                         attr = attrs["reverse"] if is_sel else attrs["normal"]
-                        _safe_addstr(stdscr, HEADER_ROWS + r, 0, text, attr)
+                        if is_sel:
+                            text = text.ljust(max_x)
+                        _safe_addstr(stdscr, HEADER_ROWS + r, 0,
+                                     text, attr)
                 else:  # DETAILS
                     if state.selected_idx < len(configs):
                         selected = configs[state.selected_idx]
-                        d_lines = format_details(selected, detail_w)
+                        if state.detail_raw and selected.file.raw_text:
+                            d_lines = format_overlay(
+                                selected.file.raw_text, detail_w)
+                        else:
+                            d_lines = format_details(selected, detail_w)
                         for r in range(visible_details):
                             dl_idx = state.detail_offset + r
                             if dl_idx >= len(d_lines):
@@ -575,36 +590,22 @@ def run_tui(configs: list[ConfigSummary],
 
             # Footer
             footer_y = max_y - 2
-            if state.overlay_open:
-                footer = "Overlay: Up/Down scroll  d/q close"
-            elif state.layout == LayoutMode.WIDE:
+            if state.layout == LayoutMode.WIDE:
                 footer = (f"Up/Down: select  PgUp/PgDn: scroll  "
-                          f"d: raw JSON  Enter: apply  q: quit")
+                          f"d: toggle raw  Enter: apply  q: quit")
             else:
                 if state.narrow_pane == NarrowPane.MENU:
                     footer = (f"Up/Down: select  Tab: Details  "
                               f"d: raw JSON  Enter: apply  q: quit")
                 else:
                     footer = (f"Up/Down/PgUp/PgDn: scroll  "
-                              f"Tab: Menu  Enter: apply  q: quit")
+                              f"Tab: Menu  d: toggle raw  "
+                              f"Enter: apply  q: quit")
             if state.status:
                 footer = f"{state.status}  |  {footer}"
             _safe_addstr(stdscr, footer_y, 0, footer, attrs["bold"])
             _safe_addstr(stdscr, max_y - 1, 0,
                          "─" * (max_x - 1), attrs["cyan"])
-
-            # Overlay
-            if state.overlay_open and state.selected_idx < len(configs):
-                raw = configs[state.selected_idx].file.raw_text
-                if raw:
-                    ov_lines = format_overlay(raw, max_x)
-                    ov_visible = max_y - 4
-                    for r in range(ov_visible):
-                        oi = state.overlay_offset + r
-                        if oi >= len(ov_lines):
-                            break
-                        _safe_addstr(stdscr, 2 + r, 0,
-                                     ov_lines[oi], attrs["normal"])
 
             stdscr.refresh()
 

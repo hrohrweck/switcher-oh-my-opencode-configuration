@@ -92,11 +92,13 @@ class StateTransitionsTests(unittest.TestCase):
         s = self._state(layout=LayoutMode.WIDE)
         self.assertEqual(handle_key(s, "enter"), "apply")
 
-    def test_wide_d_opens_overlay(self):
+    def test_wide_d_toggles_raw(self):
         s = self._state(layout=LayoutMode.WIDE)
         handle_key(s, "d")
-        self.assertTrue(s.overlay_open)
-        self.assertEqual(s.overlay_offset, 0)
+        self.assertTrue(s.detail_raw)
+        self.assertEqual(s.detail_offset, 0)
+        handle_key(s, "d")
+        self.assertFalse(s.detail_raw)
 
     def test_wide_tab_noop(self):
         s = self._state(layout=LayoutMode.WIDE)
@@ -133,31 +135,26 @@ class StateTransitionsTests(unittest.TestCase):
                         narrow_pane=NarrowPane.DETAILS)
         self.assertEqual(handle_key(s, "enter"), "apply")
 
-    def test_narrow_overlay(self):
-        s = self._state(layout=LayoutMode.NARROW)
+    def test_narrow_menu_d_switches_to_details_and_toggles_raw(self):
+        s = self._state(layout=LayoutMode.NARROW,
+                        narrow_pane=NarrowPane.MENU)
         handle_key(s, "d")
-        self.assertTrue(s.overlay_open)
+        self.assertTrue(s.detail_raw)
+        self.assertEqual(s.narrow_pane, NarrowPane.DETAILS)
 
-    # ── overlay mode ───────────────────────────────────────────────
+    def test_narrow_details_d_toggles_raw(self):
+        s = self._state(layout=LayoutMode.NARROW,
+                        narrow_pane=NarrowPane.DETAILS)
+        handle_key(s, "d")
+        self.assertTrue(s.detail_raw)
+        handle_key(s, "d")
+        self.assertFalse(s.detail_raw)
 
-    def test_overlay_close(self):
-        s = self._state(overlay_open=True, overlay_offset=5)
-        handle_key(s, "q")
-        self.assertFalse(s.overlay_open)
-        self.assertEqual(s.overlay_offset, 0)
-
-    def test_overlay_scroll(self):
-        s = self._state(overlay_open=True)
-        handle_key(s, "down")
-        self.assertEqual(s.overlay_offset, 1)
-        handle_key(s, "pagedown")
-        self.assertEqual(s.overlay_offset, 11)
-        handle_key(s, "up")
-        self.assertEqual(s.overlay_offset, 10)
-
-    def test_overlay_enter_ignored(self):
-        s = self._state(overlay_open=True)
-        self.assertIsNone(handle_key(s, "enter"))
+    def test_d_resets_detail_offset(self):
+        s = self._state(layout=LayoutMode.WIDE,
+                        detail_offset=10, detail_raw=False)
+        handle_key(s, "d")
+        self.assertEqual(s.detail_offset, 0)
 
     # ── Space ignored ──────────────────────────────────────────────
 
