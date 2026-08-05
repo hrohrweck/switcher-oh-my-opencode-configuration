@@ -97,6 +97,7 @@ def _run_plain(summaries, active) -> int:
     try:
         user_input = input(f"Select 1-{len(summaries)} or q: ").strip()
     except (EOFError, KeyboardInterrupt):
+        print("Exiting without changes")
         return 0
 
     if user_input.lower() == "q":

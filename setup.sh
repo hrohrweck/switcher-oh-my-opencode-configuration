@@ -37,7 +37,7 @@ PYTHON=""
 for candidate in python3.11 python3; do
     if command -v "$candidate" &>/dev/null; then
         ver=$("$candidate" -c 'import sys; print(sys.version_info[:2])' 2>/dev/null || true)
-        if [ "$ver" = "(3, 11)" ] || [ "$ver" = "(3, 12)" ] || [ "$ver" = "(3, 13)" ]; then
+        if [ "$ver" = "(3, 11)" ] || [ "$ver" = "(3, 12)" ] || [ "$ver" = "(3, 13)" ] || [ "$ver" = "(3, 14)" ]; then
             PYTHON="$candidate"
             break
         fi

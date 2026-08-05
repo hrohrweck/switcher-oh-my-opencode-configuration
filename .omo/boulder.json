@@ -8,7 +8,7 @@
       "plan_name": "full-screen-config-selector-tui",
       "status": "active",
       "started_at": "2026-08-05T09:40:43.771Z",
-      "updated_at": "2026-08-05T10:40:16.287Z",
+      "updated_at": "2026-08-05T10:50:11.742Z",
       "session_ids": [
         "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y"
       ],
@@ -41,6 +41,16 @@
           "status": "completed",
           "ended_at": "2026-08-05T10:40:16.287Z",
           "elapsed_ms": 410256
+        },
+        "final-wave:f1": {
+          "task_key": "final-wave:f1",
+          "task_label": "F1",
+          "task_title": "**Plan Compliance Audit** — `oracle`",
+          "session_id": "opencode:ses_02e7916deffepyrOP8lT5umS3R",
+          "agent": "oracle",
+          "updated_at": "2026-08-05T10:50:11.742Z",
+          "started_at": "2026-08-05T10:50:11.742Z",
+          "status": "running"
         }
       }
     }
@@ -48,7 +58,7 @@
   "active_plan": "/Users/hrohrweck/Nextcloud/source/private/switcher-oh-my-opencode-configuration/.omo/plans/full-screen-config-selector-tui.md",
   "started_at": "2026-08-05T09:40:43.771Z",
   "status": "active",
-  "updated_at": "2026-08-05T10:40:16.287Z",
+  "updated_at": "2026-08-05T10:50:11.742Z",
   "session_ids": [
     "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y"
   ],
@@ -81,6 +91,16 @@
       "status": "completed",
       "ended_at": "2026-08-05T10:40:16.287Z",
       "elapsed_ms": 410256
+    },
+    "final-wave:f1": {
+      "task_key": "final-wave:f1",
+      "task_label": "F1",
+      "task_title": "**Plan Compliance Audit** — `oracle`",
+      "session_id": "opencode:ses_02e7916deffepyrOP8lT5umS3R",
+      "agent": "oracle",
+      "updated_at": "2026-08-05T10:50:11.742Z",
+      "started_at": "2026-08-05T10:50:11.742Z",
+      "status": "running"
     }
   },
   "agent": "atlas"

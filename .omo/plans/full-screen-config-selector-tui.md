@@ -714,7 +714,7 @@ Deliver a safe, responsive full-screen configuration selector whose highlighted 
 
   **Commit**: YES | Message: `build: complete package migration` | Files: `tests/test_installation.py`, `switch_oh-my-opencode_config.py` (delete)
 
-- [ ] 11. Document the 2.0.0 TUI, installation, compatibility, and verification contract
+- [x] 11. Document the 2.0.0 TUI, installation, compatibility, and verification contract
 
   **What to do**:
   - Update README overview/features with full-screen WIDE/NARROW behavior, live structured Details, all Agents/Categories, invalid badges, and raw overlay.
