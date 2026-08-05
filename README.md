@@ -27,8 +27,9 @@ pipx install .
 ```
 Or from the repository directory:
 ```bash
-./setup.sh   # prefers pipx, falls back to pip --user
+./setup.sh
 ```
+The script prefers pipx, falling back to pip --user.
 
 ### pip --user (fallback)
 ```bash
@@ -43,11 +44,7 @@ After installation, two commands are available:
 - `switch_oh-my-opencode_config.py` — legacy alias
 
 ### Uninstall
-```bash
-pipx uninstall opencode-config-switcher
-# or
-python3.11 -m pip uninstall opencode-config-switcher
-```
+Use `pipx uninstall opencode-config-switcher` or `python3.11 -m pip uninstall opencode-config-switcher`.
 
 ## Usage
 
@@ -80,7 +77,7 @@ Prints a numbered list and reads one input line:
 ### How It Works
 
 1. **Configuration Discovery**: The script scans `~/.config/opencode/` for all JSON files matching `oh-my-openagent*.json` or `oh-my-opencode*.json`
-2. **File Filtering**: The active config is included in the list as the first item and marked CURRENT; `.BAK` files are excluded from selection candidates
+2. **File Filtering**: Configurations are listed in alphabetical order; the active config is marked CURRENT independently of its position. `.BAK` files are excluded.
 3. **Backup & Apply**: When you select a configuration:
    - Current active config is backed up to `.BAK` (overwrites existing backup)
    - Selected file is **copied** (not moved) to the current active config

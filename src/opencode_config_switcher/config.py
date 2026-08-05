@@ -372,6 +372,6 @@ def parse_all(active: Path, candidates: list[Path]
             continue
 
         summaries.append(
-            _parse_config(config_path, raw, config_path == active))
+            _parse_config(config_path, raw, config_path.resolve() == active.resolve()))
 
     return summaries

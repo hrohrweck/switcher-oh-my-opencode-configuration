@@ -107,12 +107,12 @@ class AppState:
             self.selected_idx = 0
             self.menu_offset = 0
             self.detail_offset = 0
+            self.overlay_offset = 0
             return
         self.selected_idx = max(0, min(
             self.selected_idx, self.config_count - 1))
-        # Menu scroll: keep selection visible
-        menu_height = AVAILABLE_ROWS - HEADER_ROWS - FOOTER_ROWS - 2
-        # Actually the available content rows depend on mode...
+        self.menu_offset = max(0, min(
+            self.menu_offset, self.config_count - 1))
         self.detail_offset = max(0, self.detail_offset)
         self.overlay_offset = max(0, self.overlay_offset)
 

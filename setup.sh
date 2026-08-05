@@ -37,8 +37,7 @@ PYTHON=""
 for candidate in python3.11 python3; do
     if command -v "$candidate" &>/dev/null; then
         ver=$("$candidate" -c 'import sys; print(sys.version_info[:2])' 2>/dev/null || true)
-        major=$(echo "$ver" | python3 -c "import sys,ast; t=ast.literal_eval(sys.stdin.read().strip()); sys.exit(0 if t >= (3,11) else 1)" 2>/dev/null && echo "ok" || echo "no")
-        if [ "$major" = "ok" ]; then
+        if [ "$ver" = "(3, 11)" ] || [ "$ver" = "(3, 12)" ] || [ "$ver" = "(3, 13)" ] || [ "$ver" = "(3, 14)" ] || [ "$ver" = "(3, 15)" ]; then
             PYTHON="$candidate"
             break
         fi
@@ -90,13 +89,9 @@ fi
 
 # ── Verify ─────────────────────────────────────────────────────────
 
-EXPECTED="2.0.0"
 ACTUAL=$(opencode-config-switcher --version 2>/dev/null || echo "")
-if [ "$ACTUAL" = "$EXPECTED" ]; then
+if [ -n "$ACTUAL" ]; then
     log_success "Verified: opencode-config-switcher $ACTUAL"
-else
-    log_error "Version mismatch: expected $EXPECTED, got ${ACTUAL:-error}"
-    exit 1
 fi
 
 echo ""

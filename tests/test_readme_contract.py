@@ -95,7 +95,6 @@ class ReadmeContractTests(unittest.TestCase):
             "python3.11 -m unittest discover -s tests -v",
             "PYTHONPATH=src python3.11 -m unittest tests.test_tui_pty -v",
             "bash -n setup.sh",
-            "pipx uninstall opencode-config-switcher",
         }
 
         fenced = re.findall(r'```(?:bash|sh)?\n(.*?)```', RAW, re.DOTALL)
@@ -105,8 +104,7 @@ class ReadmeContractTests(unittest.TestCase):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                if line not in allowlist and not any(
-                        line.startswith(a) for a in allowlist):
+                if line not in allowlist:
                     violations.append(line)
 
         self.assertEqual(
