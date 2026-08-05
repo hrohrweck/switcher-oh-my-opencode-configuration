@@ -363,7 +363,7 @@ def parse_all(active: Path, candidates: list[Path]
                 file=FileSummary(
                     path=config_path,
                     name=config_path.name,
-                    is_current=(config_path == active),
+                    is_current=(config_path.resolve() == active.resolve()),
                 ),
                 is_valid=False,
                 error=f"Cannot read {config_path.name}: "

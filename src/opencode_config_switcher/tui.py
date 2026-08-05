@@ -113,10 +113,8 @@ class AppState:
         # Menu scroll: keep selection visible
         menu_height = AVAILABLE_ROWS - HEADER_ROWS - FOOTER_ROWS - 2
         # Actually the available content rows depend on mode...
-        # Use a simple clamp for menu
-        max_menu_off = max(0, self.config_count - 1)
-        self.menu_offset = max(0, min(
-            self.menu_offset, max_menu_off))
+        self.detail_offset = max(0, self.detail_offset)
+        self.overlay_offset = max(0, self.overlay_offset)
 
 
 # ── key transitions (pure) ─────────────────────────────────────────

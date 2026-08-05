@@ -80,7 +80,7 @@ Prints a numbered list and reads one input line:
 ### How It Works
 
 1. **Configuration Discovery**: The script scans `~/.config/opencode/` for all JSON files matching `oh-my-openagent*.json` or `oh-my-opencode*.json`
-2. **File Filtering**: The active config and `.BAK` files are excluded from selection candidates
+2. **File Filtering**: The active config is included in the list as the first item and marked CURRENT; `.BAK` files are excluded from selection candidates
 3. **Backup & Apply**: When you select a configuration:
    - Current active config is backed up to `.BAK` (overwrites existing backup)
    - Selected file is **copied** (not moved) to the current active config
