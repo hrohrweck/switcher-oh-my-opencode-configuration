@@ -106,24 +106,20 @@ def _glob_configs() -> list[Path]:
 
 
 def discover_configs() -> tuple[Path, list[Path]]:
-    """Return (active_path, sorted_candidate_list) including the active config.
+    """Return (active_path, sorted_candidate_list).
+
+    The active config itself is excluded from the candidate list — only
+    preset variants are selectable.
 
     Raises FileNotFoundError if CONFIG_DIR is missing.
-    Raises RuntimeError if no config files are found.
+    Raises RuntimeError if no preset config files are found.
     """
     if not CONFIG_DIR.exists():
         raise FileNotFoundError(
             f"Configuration directory not found: {CONFIG_DIR}")
 
     active = ACTIVE_PATH
-    candidates: list[Path] = []
-
-    # Always include the current active config first, then sort
-    if active.exists():
-        candidates.append(active)
-
-    candidates.extend(_glob_configs())
-    candidates.sort(key=lambda p: p.name)
+    candidates = _glob_configs()
 
     if not candidates:
         raise RuntimeError(

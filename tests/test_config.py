@@ -82,7 +82,6 @@ class DiscoverConfigsTests(unittest.TestCase):
                     discover_configs()
 
     def test_alphabetical_order(self):
-        """Items are sorted alphabetically; is_current uses path equality."""
         home = _make_temp_home(
             active_name="oh-my-openagent.json",
             active_content='{"$schema": "x", "model_fallback": true}',
@@ -96,16 +95,14 @@ class DiscoverConfigsTests(unittest.TestCase):
                                 home / ".config" / "opencode"):
             active, candidates = discover_configs()
             names = [p.name for p in candidates]
-            # "." (0x2E) sorts before "_" (0x5F), so oh-my-openagent.json
-            # comes before oh-my-openagent_a-custom.json
+            self.assertNotIn("oh-my-openagent.json", names)
+            # "." (0x2E) sorts before "_" (0x5F)
             self.assertLess(names.index("oh-my-openagent-default.json"),
                             names.index("oh-my-openagent_a-custom.json"))
             self.assertLess(names.index("oh-my-openagent-default.json"),
                             names.index("oh-my-openagent_glm.json"))
-            self.assertLess(names.index("oh-my-openagent-default.json"),
-                            names.index("oh-my-openagent.json"))
 
-    def test_current_by_path_equality(self):
+    def test_active_excluded_from_candidates(self):
         home = _make_temp_home(
             active_name="oh-my-openagent.json",
             active_content='{"$schema":"x"}',
@@ -116,11 +113,11 @@ class DiscoverConfigsTests(unittest.TestCase):
         with mock.patch.object(C, "CONFIG_DIR",
                                          home / ".config" / "opencode"):
             active, candidates = discover_configs()
+            names = [p.name for p in candidates]
+            self.assertNotIn("oh-my-openagent.json", names)
+            self.assertIn("oh-my-openagent-aaa.json", names)
             summaries = parse_all(active, candidates)
-            current = [s for s in summaries if s.file.is_current]
-            self.assertEqual(len(current), 1)
-            self.assertEqual(current[0].file.name,
-                             "oh-my-openagent.json")
+            self.assertFalse(any(s.file.is_current for s in summaries))
 
     def test_dedup_by_name(self):
         """Same filename across both glob patterns yields one entry."""
