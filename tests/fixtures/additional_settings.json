@@ -1,0 +1,28 @@
+{
+  "$schema": "https://example.com/schema.json",
+  "model_fallback": true,
+  "runtime_fallback": {
+    "enabled": true,
+    "retry_on_errors": [429, 503, 529],
+    "unknown_field": "should be in additional"
+  },
+  "telemetry": false,
+  "agents": {
+    "sisyphus": {
+      "model": "openai/gpt-5",
+      "variant": "max",
+      "fallback_models": [
+        {"model": "kimi/k3", "variant": "max"},
+        {"model": "deepseek/v4", "variant": "max"}
+      ]
+    }
+  },
+  "categories": {
+    "visual-engineering": {
+      "model": "openrouter/mimo",
+      "fallback_models": ["kimi/k2.6"]
+    }
+  },
+  "agent_order": ["sisyphus", "oracle"],
+  "disabled_mcps": ["server1", "server2"]
+}

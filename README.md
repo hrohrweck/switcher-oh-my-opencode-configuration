@@ -1,250 +1,87 @@
-# OpenCode Configuration Switcher
+# OpenCode Configuration Switcher v2.0.0
 
-An interactive Python script for switching between oh-my-opencode / oh-my-openagent configuration files with a user-friendly terminal interface.
+A full-screen Python curses TUI for switching between oh-my-opencode / oh-my-openagent configuration files with a structured details panel showing agent models, fallback chains, and configuration metadata.
 
 ## Features
 
-- **Interactive Menu System**: Colorized terminal UI with arrow-key selection with inverted-line highlight
-- **Configuration Preview**: View detailed contents of configuration files before applying (`d` command)
-- **Safe Operations**: Automatic backup creation before switching configurations
-- **UTF-8 Support**: Smart box drawing characters with ASCII fallback for compatibility
-- **Keyboard Navigation**: Intuitive controls with Up/Down arrows + inverted-line highlight, and space/enter for navigation
-- **Current Config Indicator**: Clear visual indication of the currently active configuration
-- **Backup Management**: Automatic backup file management with restore capability
+- **Full-Screen TUI**: Uses all available terminal space with a polished curses interface
+- **Structured Details Panel**: Right-side panel shows primary/fallback models for every Agent and Category, global fallback policy, runtime settings, and additional configuration metadata
+- **Responsive Layout**: Wide mode (100+ columns) shows menu and details side by side; narrow mode uses Tab to switch between full-width Menu and Details panes
+- **Invalid Detection**: Malformed JSON or unreadable configs show an INVALID badge and are blocked from being applied
+- **Raw JSON Overlay**: Press `d` to view the full raw configuration in a scrollable overlay
+- **Safe Operations**: Automatic single-generation `.BAK` backup creation before switching
+- **Plain Mode**: Non-TTY/piped execution with numbered selection and documented exit codes
+- **CURRENT Config Indicator**: Clear visual indication of the currently active configuration with a CURRENT badge
 
 ## Requirements
 
-- **Python 3.6+** (3.7+ recommended for best performance)
+- **Python 3.11+**
 - **oh-my-opencode** or **oh-my-openagent** installed with configuration directory at `~/.config/opencode/`
-- **Unix-like system** (Linux, macOS, or WSL)
+- **Unix-like system** (Linux, macOS). Windows is unsupported (no stdlib curses).
 
 ## Installation
 
-### Method 1: Using the setup script (Recommended)
-
-1. Clone or download this repository:
+### pipx (Recommended)
 ```bash
-git clone <repository-url>
-cd switcher-oh-my-opencode-configuration
+pipx install .
 ```
-
-2. Run the setup script:
+Or from the repository directory:
 ```bash
 ./setup.sh
 ```
+The script prefers pipx, falling back to pip --user.
 
-The script will:
-- Install the script to `~/.local/bin/`
-- Make it executable
-- Check if the directory is in your PATH
-- Verify the installation
-
-3. Ensure `~/.local/bin` is in your PATH:
+### pip --user (fallback)
 ```bash
-# Add to your shell profile (choose one)
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-# or for zsh:
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-# Then reload:
-source ~/.bashrc  # or source ~/.zshrc
+python3.11 -m pip install --user .
 ```
 
-### Method 2: Manual Installation
+If you encounter a `externally-managed-environment` error (PEP 668), install pipx first or use an isolated virtual environment.
 
-1. Clone or copy this repository:
-```bash
-git clone <repository-url>
-cd switcher-oh-my-opencode-configuration
-```
+### Commands
+After installation, two commands are available:
+- `opencode-config-switcher` — canonical command
+- `switch_oh-my-opencode_config.py` — legacy alias
 
-2. Make the script executable:
-```bash
-chmod +x switch_oh-my-opencode_config.py
-```
-
-3. Copy to your local bin directory:
-```bash
-mkdir -p ~/.local/bin
-cp switch_oh-my-opencode_config.py ~/.local/bin/
-```
-
-4. Ensure `~/.local/bin` is in your PATH (as shown above)
+### Uninstall
+Use `pipx uninstall opencode-config-switcher` or `python3.11 -m pip uninstall opencode-config-switcher`.
 
 ## Usage
 
-### Basic Usage
+### TUI Mode (interactive terminal)
 
-Run the script:
-```bash
-switch_oh-my-opencode_config.py
-```
+| Context | Key | Action |
+|---------|-----|--------|
+| **WIDE** (100+ cols) | Up / Down | Select configuration |
+| | PageUp / PageDown | Scroll Details panel |
+| | `d` | Open raw JSON overlay |
+| | Enter | Apply and exit |
+| | q / Ctrl-D / Ctrl-C | Quit without changes |
+| **NARROW** (40-99 cols) | Tab | Switch Menu / Details |
+| | Up / Down | Navigate active pane |
+| | Enter | Apply from either pane |
+| | q / Ctrl-D / Ctrl-C | Quit |
+| **Overlay** | Up / Down / PgUp/PgDn | Scroll |
+| | `d` / `q` | Close overlay |
+| **Too Small** (<40 cols or <12 rows) | q / Ctrl-C / Ctrl-D | Quit |
 
-Or with explicit Python:
-```bash
-python3 ~/.local/bin/switch_oh-my-opencode_config.py
-```
+Space does nothing in all contexts.
 
-### Version Check
-
-Check the script version:
-```bash
-switch_oh-my-opencode_config.py --version
-```
-
-### Interactive Menu Interface
-
-The script provides an interactive menu with the following commands:
-
-| Command | Description |
-|---------|-------------|
-| `Up`/`Down` | Move the highlight between configurations |
-| `Enter` | Apply the highlighted configuration |
-| `d` | View detail of the highlighted configuration |
-| `q` | Quit without making any changes |
-| `Space` | Navigate through pages in detail view |
-| `b` | Go to previous page in detail view |
-| `Arrow Keys` | Navigate through pages in detail view |
+### Plain Mode (piped / non-TTY)
+Prints a numbered list and reads one input line:
+- `q` or EOF: prints `Exiting without changes`, exit 0
+- Valid number: apply, prints `Configuration applied:` and `Backup saved to:`, exit 0
+- Invalid number / out-of-range / invalid config: error to stderr, exit 2
+- Copy failure: error to stderr, exit 1
 
 ### How It Works
 
 1. **Configuration Discovery**: The script scans `~/.config/opencode/` for all JSON files matching `oh-my-openagent*.json` or `oh-my-opencode*.json`
-2. **File Filtering**: It excludes the current active config (`oh-my-openagent.json` or `oh-my-opencode.json`) and `.BAK` files from the selection list
+2. **File Filtering**: Configurations are listed in alphabetical order; the active config is marked CURRENT independently of its position. `.BAK` files are excluded.
 3. **Backup & Apply**: When you select a configuration:
    - Current active config is backed up to `.BAK` (overwrites existing backup)
    - Selected file is **copied** (not moved) to the current active config
    - The new configuration becomes immediately active
-
-## Configuration Directory Structure
-
-```
-~/.config/opencode/
-├── oh-my-openagent.json              # Current active configuration (preferred, new name)
-├── oh-my-openagent.json.BAK          # Backup of previous configuration
-├── oh-my-openagent-default.json      # Default configuration preset
-├── oh-my-openagent_OpenAI-GLM4.7.json # OpenAI + GLM4.7 configuration
-├── oh-my-openagent_OpenAI-Only.json  # OpenAI-only configuration
-├── oh-my-openagent_Custom.json       # Your custom configuration
-├── oh-my-opencode.json               # Legacy current active configuration (deprecated)
-└── oh-my-opencode-*.json             # Legacy configuration presets (still supported)
-```
-
-## Creating New Configuration Presets
-
-### Method 1: From Current Configuration
-
-1. Copy your current configuration to a new file:
-```bash
-cp ~/.config/opencode/oh-my-openagent.json ~/.config/opencode/oh-my-openagent-myconfig.json
-
-# Edit your custom configuration
-nano ~/.config/opencode/oh-my-openagent-myconfig.json
-# or
-vim ~/.config/opencode/oh-my-openagent-myconfig.json
-```
-
-3. Run the switcher to select your new configuration from the menu
-
-### Method 2: From Template
-
-1. Copy a template configuration:
-```bash
-cp ~/.config/opencode/oh-my-openagent-default.json ~/.config/opencode/oh-my-openagent-mytemplate.json
-```
-
-2. Modify the template to create your custom configuration
-
-## Restoring from Backup
-
-If you need to restore the previous configuration:
-
-```bash
-# Check available backups
-ls -la ~/.config/opencode/oh-my-openagent*.BAK ~/.config/opencode/oh-my-opencode*.BAK
-
-# To restore from backup
-cp ~/.config/opencode/oh-my-openagent.json.BAK ~/.config/opencode/oh-my-openagent.json
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"Configuration directory not found"**
-   - Ensure oh-my-opencode is installed
-   - Check the configuration directory exists: `ls -la ~/.config/opencode/`
-
-2. **"No configuration files found"**
-   - Verify you have configuration files in `~/.config/opencode/`
-   - Files should match pattern: `oh-my-openagent-*.json` or `oh-my-opencode-*.json` (excluding current and backup)
-
-3. **"Permission denied"**
-   - Ensure the script is executable: `chmod +x switch_oh-my-opencode_config.py`
-   - Check write permissions on `~/.config/opencode/`
-
-4. **Script not found in PATH**
-   - Verify `~/.local/bin` is in your PATH
-   - Try running with full path: `python3 ~/.local/bin/switch_oh-my-opencode_config.py`
-
-### Debug Mode
-
-For troubleshooting, you can add debug information by examining the script's environment:
-
-```bash
-# Check Python version
-python3 --version
-
-# Check if required modules are available
-python3 -c "import json, shutil, sys; print('All modules available')"
-```
-
-## Advanced Usage
-
-### Integration with Shell Scripts
-
-The script can be integrated into shell scripts for automation:
-
-```bash
-#!/bin/bash
-# Example: Apply a specific configuration programmatically
-CONFIG_FILE="oh-my-openagent-custom.json"
-CONFIG_PATH="$HOME/.config/opencode/$CONFIG_FILE"
-
-if [ -f "$CONFIG_PATH" ]; then
-    cp "$CONFIG_PATH" "$HOME/.config/opencode/oh-my-openagent.json"
-    echo "Configuration applied: $CONFIG_FILE"
-else
-    echo "Configuration file not found: $CONFIG_PATH"
-    exit 1
-fi
-```
-
-### Configuration Management Script
-
-Create a management script for your configurations:
-
-```bash
-#!/bin/bash
-# config-manager.sh
-
-case "$1" in
-    "list")
-        echo "Available configurations:"
-        ls -la ~/.config/opencode/oh-my-openagent*.json ~/.config/opencode/oh-my-opencode*.json | grep -v "\.BAK$"
-        ;;
-    "backup")
-        cp ~/.config/opencode/oh-my-openagent.json ~/.config/opencode/oh-my-openagent-backup-$(date +%Y%m%d-%H%M%S).json
-        echo "Backup created"
-        ;;
-    "clean")
-        find ~/.config/opencode/ -name "oh-my-openagent*.BAK" -delete -o -name "oh-my-opencode*.BAK" -delete
-        echo "Cleaned up backup files"
-        ;;
-    *)
-        echo "Usage: $0 {list|backup|clean}"
-        exit 1
-        ;;
-esac
-```
 
 ## License
 
@@ -273,25 +110,27 @@ To contribute to this project:
 
 ## Version History
 
-- **v1.2.0** (Current):
+- **v2.0.0** (Current):
+  - Full-screen `curses` TUI with structured Details panel showing all agent/category models, fallback chains, and configuration metadata
+  - Responsive WIDE/NARROW/TOO_SMALL layout with resize handling
+  - Structured parsing of `agents`, `categories`, `runtime_fallback`, and `model_fallback` fields
+  - Invalid JSON detection and apply blocking with inline error display
+  - Raw JSON overlay accessible with `d` key
+  - Python 3.11+ required, packaged with `pyproject.toml` and console-script entry points
+  - Non-TTY plain mode with documented exit codes (0/1/2)
+  - `pipx`-first installer with `pip --user` fallback and PEP 668 guidance
+  - Migration: legacy `switch_oh-my-opencode_config.py` command preserved as generated alias
+
+- **v1.2.0**:
   - Arrow-key navigation with inverted-line highlight
   - Enter applies the highlighted configuration immediately
-  - Numbers removed from menu; `d` opens detail of highlighted item
-  - Non-tty numeric fallback for piped/automated use
   - Added support for `oh-my-openagent*.json` naming convention
-  - Legacy `oh-my-opencode*.json` files remain supported
-  - Auto-detects active config file (prefers openagent over opencode)
-  - Updated documentation for dual-name support
 
 - **v1.1.0**:
   - Improved version management
-  - Enhanced documentation
 
 - **v1.0.0**:
   - Initial release
-  - Basic configuration switching functionality
-  - Interactive menu system
-  - Backup management
 
 ## Support
 

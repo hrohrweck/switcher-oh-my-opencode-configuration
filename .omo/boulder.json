@@ -1,0 +1,107 @@
+{
+  "schema_version": 2,
+  "active_work_id": "full-screen-config-selector-tui-f5eea828",
+  "works": {
+    "full-screen-config-selector-tui-f5eea828": {
+      "work_id": "full-screen-config-selector-tui-f5eea828",
+      "active_plan": "/Users/hrohrweck/Nextcloud/source/private/switcher-oh-my-opencode-configuration/.omo/plans/full-screen-config-selector-tui.md",
+      "plan_name": "full-screen-config-selector-tui",
+      "status": "active",
+      "started_at": "2026-08-05T09:40:43.771Z",
+      "updated_at": "2026-08-05T11:15:21.327Z",
+      "session_ids": [
+        "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y"
+      ],
+      "session_origins": {
+        "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y": "direct"
+      },
+      "agent": "atlas",
+      "task_sessions": {
+        "todo:1": {
+          "task_key": "todo:1",
+          "task_label": "1",
+          "task_title": "Establish package metadata, version, and entry-point contracts",
+          "session_id": "opencode:ses_02e9df0c9ffeo450Z2Szsld58s",
+          "agent": "Sisyphus-Junior",
+          "category": "unspecified-low",
+          "started_at": "2026-08-05T09:42:29.554Z",
+          "status": "completed",
+          "updated_at": "2026-08-05T10:06:12.857Z",
+          "ended_at": "2026-08-05T10:06:12.857Z",
+          "elapsed_ms": 1423303
+        },
+        "todo:9": {
+          "task_key": "todo:9",
+          "task_label": "9",
+          "task_title": "Prove real curses behavior through PTY and visual regression scenarios",
+          "session_id": "opencode:ses_02e87e190fferMqMBRqvQuwWCR",
+          "agent": "oracle",
+          "updated_at": "2026-08-05T10:40:16.287Z",
+          "started_at": "2026-08-05T10:33:26.031Z",
+          "status": "completed",
+          "ended_at": "2026-08-05T10:40:16.287Z",
+          "elapsed_ms": 410256
+        },
+        "final-wave:f1": {
+          "task_key": "final-wave:f1",
+          "task_label": "F1",
+          "task_title": "**Plan Compliance Audit** — `oracle`",
+          "session_id": "opencode:ses_02e625de9ffesikHG90nT5eWTl",
+          "agent": "oracle",
+          "started_at": "2026-08-05T10:50:11.742Z",
+          "status": "running",
+          "updated_at": "2026-08-05T11:15:21.327Z"
+        }
+      }
+    }
+  },
+  "active_plan": "/Users/hrohrweck/Nextcloud/source/private/switcher-oh-my-opencode-configuration/.omo/plans/full-screen-config-selector-tui.md",
+  "started_at": "2026-08-05T09:40:43.771Z",
+  "status": "active",
+  "updated_at": "2026-08-05T11:15:21.327Z",
+  "session_ids": [
+    "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y"
+  ],
+  "session_origins": {
+    "opencode:ses_02f43fbf1ffeEsRBQw03jV6F6Y": "direct"
+  },
+  "plan_name": "full-screen-config-selector-tui",
+  "task_sessions": {
+    "todo:1": {
+      "task_key": "todo:1",
+      "task_label": "1",
+      "task_title": "Establish package metadata, version, and entry-point contracts",
+      "session_id": "opencode:ses_02e9df0c9ffeo450Z2Szsld58s",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-low",
+      "started_at": "2026-08-05T09:42:29.554Z",
+      "status": "completed",
+      "updated_at": "2026-08-05T10:06:12.857Z",
+      "ended_at": "2026-08-05T10:06:12.857Z",
+      "elapsed_ms": 1423303
+    },
+    "todo:9": {
+      "task_key": "todo:9",
+      "task_label": "9",
+      "task_title": "Prove real curses behavior through PTY and visual regression scenarios",
+      "session_id": "opencode:ses_02e87e190fferMqMBRqvQuwWCR",
+      "agent": "oracle",
+      "updated_at": "2026-08-05T10:40:16.287Z",
+      "started_at": "2026-08-05T10:33:26.031Z",
+      "status": "completed",
+      "ended_at": "2026-08-05T10:40:16.287Z",
+      "elapsed_ms": 410256
+    },
+    "final-wave:f1": {
+      "task_key": "final-wave:f1",
+      "task_label": "F1",
+      "task_title": "**Plan Compliance Audit** — `oracle`",
+      "session_id": "opencode:ses_02e625de9ffesikHG90nT5eWTl",
+      "agent": "oracle",
+      "started_at": "2026-08-05T10:50:11.742Z",
+      "status": "running",
+      "updated_at": "2026-08-05T11:15:21.327Z"
+    }
+  },
+  "agent": "atlas"
+}

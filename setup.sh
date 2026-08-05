@@ -1,46 +1,23 @@
 #!/bin/bash
 #
-# setup.sh - Installer for switch_oh-my-opencode_config.py
-# This script installs the configuration switcher to ~/.local/bin/
+# setup.sh - Installer for opencode-config-switcher
+# Requires Python 3.11+. Installs via pipx (preferred) or pip --user.
 #
 
 set -e
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Version
-VERSION="1.1.0"
-
-# Configuration
-SCRIPT_NAME="switch_oh-my-opencode_config.py"
-INSTALL_DIR="$HOME/.local/bin"
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_FILE="$SOURCE_DIR/$SCRIPT_NAME"
-DEST_FILE="$INSTALL_DIR/$SCRIPT_NAME"
-
-# Functions
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
 print_box_header() {
     local title="$1"
@@ -52,75 +29,91 @@ print_box_header() {
     echo -e "${NC}"
 }
 
-# Main installation
-main() {
-    print_box_header "OpenCode Configuration Switcher Installer v$VERSION"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    # Check if source file exists
-    if [ ! -f "$SOURCE_FILE" ]; then
-        log_error "Source file not found: $SOURCE_FILE"
-        log_info "Please run this script from the project directory"
+# ── Python version check ──────────────────────────────────────────
+
+PYTHON=""
+for candidate in python3.11 python3; do
+    if command -v "$candidate" &>/dev/null; then
+        ver=$("$candidate" -c 'import sys; print(sys.version_info[:2])' 2>/dev/null || true)
+        if [ "$ver" = "(3, 11)" ] || [ "$ver" = "(3, 12)" ] || [ "$ver" = "(3, 13)" ] || [ "$ver" = "(3, 14)" ] || [ "$ver" = "(3, 15)" ]; then
+            PYTHON="$candidate"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    detected=$("${candidate:-python3}" --version 2>&1 || echo "none")
+    log_error "Python 3.11+ is required. Detected: $detected"
+    log_info "Install Python 3.11+ via https://python.org or your package manager"
+    exit 1
+fi
+
+log_info "Using Python: $($PYTHON --version)"
+
+# ── Install ────────────────────────────────────────────────────────
+
+print_box_header "openCode Configuration Switcher Installer"
+
+if command -v pipx &>/dev/null; then
+    log_info "Installing with pipx..."
+    pipx install --force "$SOURCE_DIR"
+    log_success "pipx installation complete"
+else
+    log_info "pipx not found — using pip --user"
+    if ! "$PYTHON" -m pip install --user --upgrade "$SOURCE_DIR" 2>/tmp/opencode-setup-pip-err.$$; then
+        pip_err=$(cat /tmp/opencode-setup-pip-err.$$ 2>/dev/null || true)
+        rm -f /tmp/opencode-setup-pip-err.$$
+        if echo "$pip_err" | grep -q "externally-managed-environment"; then
+            log_error "This Python environment is externally managed (PEP 668)."
+            echo ""
+            echo "  Options:"
+            echo "    1. Install pipx and re-run this script:"
+            echo "       brew install pipx   # macOS"
+            echo "       pipx ensurepath"
+            echo ""
+            echo "    2. Create and use an isolated virtual environment for the command."
+            echo ""
+            echo "  The script will not add --break-system-packages automatically."
+        else
+            log_error "pip install failed:"
+            echo "$pip_err"
+        fi
         exit 1
     fi
+    rm -f /tmp/opencode-setup-pip-err.$$
+    log_success "pip install complete"
+fi
 
-    log_info "Source file found: $SOURCE_FILE"
+# ── Verify ─────────────────────────────────────────────────────────
 
-    # Create install directory if it doesn't exist
-    if [ ! -d "$INSTALL_DIR" ]; then
-        log_info "Creating installation directory: $INSTALL_DIR"
-        mkdir -p "$INSTALL_DIR" || {
-            log_error "Failed to create installation directory"
-            exit 1
-        }
-        log_success "Installation directory created"
-    else
-        log_info "Installation directory exists: $INSTALL_DIR"
-    fi
+ACTUAL=$(opencode-config-switcher --version 2>/dev/null || echo "")
+if [ -n "$ACTUAL" ]; then
+    log_success "Verified: opencode-config-switcher $ACTUAL"
+fi
 
-    # Check if install directory is in PATH
-    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        log_warning "$INSTALL_DIR is not in your PATH"
-        log_info "You may need to add it to your PATH:"
-        echo ""
-        echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-        echo ""
-        log_info "Add this to your ~/.bashrc or ~/.zshrc"
-    else
-        log_success "$INSTALL_DIR is in your PATH"
-    fi
+echo ""
+log_success "Installation complete!"
+echo ""
+echo "  Commands:"
+echo "    opencode-config-switcher"
+echo "    switch_oh-my-opencode_config.py  (legacy alias)"
+echo ""
 
-    # Copy the script
-    log_info "Installing $SCRIPT_NAME to $INSTALL_DIR"
-    if cp "$SOURCE_FILE" "$DEST_FILE"; then
-        log_success "Script copied successfully"
-    else
-        log_error "Failed to copy script"
-        exit 1
-    fi
+# PATH check
+BIN_DIR=""
+if command -v pipx &>/dev/null; then
+    BIN_DIR="$HOME/.local/bin"
+else
+    BIN_DIR=$("$PYTHON" -m site --user-base 2>/dev/null || echo "$HOME/.local")/bin
+fi
 
-    # Make it executable
-    log_info "Making script executable"
-    if chmod +x "$DEST_FILE"; then
-        log_success "Script is now executable"
-    else
-        log_error "Failed to make script executable"
-        exit 1
-    fi
-
-    # Verify installation
-    if [ -x "$DEST_FILE" ]; then
-        echo ""
-        log_success "Installation completed successfully!"
-        echo ""
-        echo -e "${CYAN}${BOLD}Installed:${NC} $DEST_FILE"
-        echo -e "${CYAN}${BOLD}Command:${NC}  $SCRIPT_NAME"
-        echo ""
-        log_info "You can now run: $SCRIPT_NAME"
-    else
-        log_error "Installation verification failed"
-        exit 1
-    fi
-}
-
-# Run main function
-main
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    log_warning "$BIN_DIR is not in your PATH"
+    echo ""
+    echo "  Add to your shell profile:"
+    echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    echo ""
+fi

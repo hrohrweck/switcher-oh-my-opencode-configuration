@@ -1,0 +1,13 @@
+{
+  "$schema": "https://example.com/schema.json",
+  "model_fallback": false,
+  "runtime_fallback": {
+    "enabled": false
+  },
+  "agents": {
+    "sisyphus": {
+      "model": "ollama/local-model"
+    }
+  },
+  "categories": {}
+}
