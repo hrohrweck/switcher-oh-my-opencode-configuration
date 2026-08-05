@@ -19,6 +19,7 @@ classifiers = [
 
 [project.scripts]
 opencode-config-switcher = "opencode_config_switcher.cli:main"
+switch-omo-config = "opencode_config_switcher.cli:main"
 "switch_oh-my-opencode_config.py" = "opencode_config_switcher.cli:main"
 
 [tool.setuptools.packages.find]

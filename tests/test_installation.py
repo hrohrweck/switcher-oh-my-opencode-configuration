@@ -46,6 +46,7 @@ class InstallationTests(unittest.TestCase):
 
         # Test version commands
         for cmd_name in ("opencode-config-switcher",
+                         "switch-omo-config",
                          "switch_oh-my-opencode_config.py"):
             cmd = str(venv / "bin" / cmd_name)
             result = subprocess.run(

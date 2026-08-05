@@ -82,11 +82,14 @@ class PackageMetadataTests(unittest.TestCase):
             scripts["opencode-config-switcher"],
             "opencode_config_switcher.cli:main")
         self.assertEqual(
+            scripts["switch-omo-config"],
+            "opencode_config_switcher.cli:main")
+        self.assertEqual(
             scripts["switch_oh-my-opencode_config.py"],
             "opencode_config_switcher.cli:main")
 
-    def test_exactly_two_scripts(self):
-        self.assertEqual(len(self.meta["project"]["scripts"]), 2)
+    def test_exactly_three_scripts(self):
+        self.assertEqual(len(self.meta["project"]["scripts"]), 3)
 
     # ── package discovery ───────────────────────────────────────────────
 
