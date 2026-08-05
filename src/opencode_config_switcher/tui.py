@@ -610,18 +610,13 @@ def run_tui(configs: list[ConfigSummary],
 
             stdscr.refresh()
 
-            # Input
+            # Input — route all keys through handle_key
             key = stdscr.getch()
-            if key == ord("q"):
-                return TuiResult(TuiOutcome.QUIT)
-            if key == ord("\x04"):  # Ctrl-D
-                return TuiResult(TuiOutcome.QUIT)
             if key == curses.KEY_RESIZE:
                 curses.update_lines_cols()
                 state.clamp()
                 continue
 
-            # Map curses constants to our string keys
             key_map = {
                 curses.KEY_UP: "up",
                 curses.KEY_DOWN: "down",
@@ -630,8 +625,11 @@ def run_tui(configs: list[ConfigSummary],
                 ord("\t"): "tab",
                 ord("d"): "d",
                 ord("D"): "d",
-                10: "enter",  # Enter
-                13: "enter",  # Enter
+                ord("q"): "q",
+                ord("\x04"): "ctrld",
+                3: "ctrlc",
+                10: "enter",
+                13: "enter",
                 ord(" "): " ",
             }
             key_str = key_map.get(key)
@@ -670,12 +668,11 @@ def run_tui(configs: list[ConfigSummary],
             error_type=type(exc).__name__,
             error_message=str(exc),
         )
-
-    # Restore signal handlers
-    for sig_num, old_handler in old_handlers.items():
-        try:
-            signal.signal(sig_num, old_handler)
-        except Exception:
-            pass
+    finally:
+        for sig_num, old_handler in old_handlers.items():
+            try:
+                signal.signal(sig_num, old_handler)
+            except Exception:
+                pass
 
     return result

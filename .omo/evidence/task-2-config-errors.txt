@@ -1,0 +1,6 @@
+(trailing comma parse error)
+Traceback (most recent call last):
+  File "<string>", line 10, in <module>
+  File "/Users/hrohrweck/.local/share/mise/installs/python/3.11.15/lib/python3.11/unittest/__init__.py", line 98, in __getattr__
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+AttributeError: module 'unittest' has no attribute 'mock'

@@ -4,6 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opencode-config-switcher"
+dynamic = ["version"]
 description = "Full-screen TUI for switching oh-my-openagent and oh-my-opencode configurations"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -22,3 +23,6 @@ opencode-config-switcher = "opencode_config_switcher.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "opencode_config_switcher.__version__"}

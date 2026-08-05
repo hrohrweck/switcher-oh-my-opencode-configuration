@@ -1,0 +1,23 @@
+test_build_backend (tests.test_package_metadata.PackageMetadataTests.test_build_backend) ... ok
+test_build_requires_min_setuptools (tests.test_package_metadata.PackageMetadataTests.test_build_requires_min_setuptools) ... ok
+test_console_scripts (tests.test_package_metadata.PackageMetadataTests.test_console_scripts) ... ok
+test_description (tests.test_package_metadata.PackageMetadataTests.test_description) ... ok
+test_exactly_two_scripts (tests.test_package_metadata.PackageMetadataTests.test_exactly_two_scripts) ... ok
+test_license_file (tests.test_package_metadata.PackageMetadataTests.test_license_file) ... ok
+test_name (tests.test_package_metadata.PackageMetadataTests.test_name) ... ok
+test_no_runtime_dependencies (tests.test_package_metadata.PackageMetadataTests.test_no_runtime_dependencies) ... ok
+test_packages_find_src (tests.test_package_metadata.PackageMetadataTests.test_packages_find_src) ... ok
+test_python_floor (tests.test_package_metadata.PackageMetadataTests.test_python_floor) ... ok
+test_python_floor_rejects_310 (tests.test_package_metadata.PackageMetadataTests.test_python_floor_rejects_310)
+Validation helper: >=3.11 rejects 3.10. ... ok
+test_readme (tests.test_package_metadata.PackageMetadataTests.test_readme) ... ok
+test_version_not_duplicated (tests.test_package_metadata.PackageMetadataTests.test_version_not_duplicated)
+pyproject.toml has no static version field. ... ok
+test_version_single_source (tests.test_package_metadata.PackageMetadataTests.test_version_single_source)
+Version 2.0.0 lives only in opencode_config_switcher.__init__. ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.001s
+
+OK
+version=2.0.0

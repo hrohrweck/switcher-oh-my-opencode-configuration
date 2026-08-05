@@ -1,0 +1,40 @@
+test_alphabetical_order (tests.test_config.DiscoverConfigsTests.test_alphabetical_order)
+Items are sorted alphabetically; is_current uses path equality. ... ok
+test_current_by_path_equality (tests.test_config.DiscoverConfigsTests.test_current_by_path_equality) ... ok
+test_dedup_by_name (tests.test_config.DiscoverConfigsTests.test_dedup_by_name)
+Same filename across both glob patterns yields one entry. ... ok
+test_missing_dir_raises (tests.test_config.DiscoverConfigsTests.test_missing_dir_raises) ... ok
+test_all_none (tests.test_config.ModelSpecTests.test_all_none) ... ok
+test_immutable (tests.test_config.ModelSpecTests.test_immutable) ... ok
+test_additional_settings (tests.test_config.ParseAllTests.test_additional_settings) ... ok
+test_cached_raw_text (tests.test_config.ParseAllTests.test_cached_raw_text) ... ok
+test_file_metadata (tests.test_config.ParseAllTests.test_file_metadata) ... ok
+test_full_agents_count (tests.test_config.ParseAllTests.test_full_agents_count) ... ok
+test_full_categories_count (tests.test_config.ParseAllTests.test_full_categories_count) ... ok
+test_full_fallback_normalization (tests.test_config.ParseAllTests.test_full_fallback_normalization) ... ok
+test_full_is_valid (tests.test_config.ParseAllTests.test_full_is_valid) ... ok
+test_full_metadata (tests.test_config.ParseAllTests.test_full_metadata) ... ok
+test_full_runtime (tests.test_config.ParseAllTests.test_full_runtime) ... ok
+test_malformed_has_warnings (tests.test_config.ParseAllTests.test_malformed_has_warnings) ... ok
+test_malformed_skips_bad_entries (tests.test_config.ParseAllTests.test_malformed_skips_bad_entries) ... ok
+test_malformed_still_valid (tests.test_config.ParseAllTests.test_malformed_still_valid) ... ok
+test_mixed_object_array_fallback (tests.test_config.ParseAllTests.test_mixed_object_array_fallback) ... ok
+test_mixed_string_array_fallback (tests.test_config.ParseAllTests.test_mixed_string_array_fallback) ... ok
+test_mixed_string_fallback (tests.test_config.ParseAllTests.test_mixed_string_fallback) ... ok
+test_mixed_truly_mixed_fallback (tests.test_config.ParseAllTests.test_mixed_truly_mixed_fallback) ... ok
+test_no_reread_after_parse (tests.test_config.ParseAllTests.test_no_reread_after_parse)
+Patching open after discovery must not affect rendered summaries. ... ok
+test_non_object_top_level (tests.test_config.ParseAllTests.test_non_object_top_level) ... ok
+test_sparse_empty_categories (tests.test_config.ParseAllTests.test_sparse_empty_categories) ... ok
+test_sparse_is_valid (tests.test_config.ParseAllTests.test_sparse_is_valid) ... ok
+test_sparse_missing_fallbacks (tests.test_config.ParseAllTests.test_sparse_missing_fallbacks) ... ok
+test_sparse_missing_schema (tests.test_config.ParseAllTests.test_sparse_missing_schema) ... ok
+test_sparse_model_fallback_false (tests.test_config.ParseAllTests.test_sparse_model_fallback_false) ... ok
+test_trailing_comma_invalid (tests.test_config.ParseAllTests.test_trailing_comma_invalid) ... ok
+test_empty_fallbacks (tests.test_config.RouteSummaryTests.test_empty_fallbacks) ... ok
+test_with_warnings (tests.test_config.RouteSummaryTests.test_with_warnings) ... ok
+
+----------------------------------------------------------------------
+Ran 32 tests in 0.005s
+
+OK

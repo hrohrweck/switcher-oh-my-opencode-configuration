@@ -1,0 +1,11 @@
+test_echo_mode (tests.test_pty_harness.PtyHarnessSelfTests.test_echo_mode) ... ok
+test_initial_dimensions (tests.test_pty_harness.PtyHarnessSelfTests.test_initial_dimensions) ... ok
+test_live_resize (tests.test_pty_harness.PtyHarnessSelfTests.test_live_resize) ... ok
+test_no_leaked_child_after_close (tests.test_pty_harness.PtyHarnessSelfTests.test_no_leaked_child_after_close) ... ok
+test_signal_exit (tests.test_pty_harness.PtyHarnessSelfTests.test_signal_exit) ... ok
+test_timeout_cleanup (tests.test_pty_harness.PtyHarnessSelfTests.test_timeout_cleanup) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 2.085s
+
+OK
