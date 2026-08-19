@@ -42,15 +42,26 @@ Chain surgery layer (Task 14, binding for Tasks 15/16):
     transition: it performs the deferred move/delete-entry surgery,
     marks dirty where the core could not (delete-entry — moves already
     set it in-core), clamps ``entry_index`` after removal, and returns
-    a ``ShellPrompt`` for "add" (None otherwise).  Removing an agent's
+    a ``ShellPrompt`` for "add" (None otherwise).      Removing an agent's
     primary promotes fallback[0] via write-back; an empty agent chain
     removes both keys.
+
+Forms layer (Task 15, binding for Task 16):
+    ``FormField``/``FormState`` model the two FORM screens as PURE
+    state (no curses).  ``build_entry_form``/``build_settings_form``
+    prefill from a chain entry / the ``[opencode]`` harness block,
+    stashing every non-editable key in ``extra_preserved`` (merged
+    back verbatim on save).  ``validate_and_collect`` runs the Task
+    13 parsers (kind-specific messages; blank numerics are ABSENT),
+    ``apply_entry_form``/``apply_settings_form`` write through the
+    Task 14 surgery, and ``handle_form_key`` is the key glue the
+    shell routes through ("move"/"cycle"/"toggle"/"none").
 """
 # allow: SIZE_OK — plan-pinned single-module layout (Tasks 14/15/16
 # extend this file): pure core + thin shell, mirroring tui.py.
 
 import curses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, NamedTuple
 
@@ -767,6 +778,286 @@ def cycle_reasoning(current: str | None, direction: int) -> str | None:
 def format_reasoning_custom(value: str) -> str:
     """Display form for a reasoning value outside the enum."""
     return f"<custom:{value}>"
+
+
+# ── forms layer (Task 15) ───────────────────────────────────────────
+#
+# PURE form state for the two FORM screens.  Task 16 renders
+# ``FormState`` in the curses shell and routes form keys through
+# ``handle_form_key``; the apply_* functions perform the document
+# work (entry via Task 14 ``set_entry``; settings in place on the
+# harness block) and report via ``OperationResult``.
+
+# Entry keys the form edits; every other key lands in extra_preserved
+# (unknown keys AND known-but-uneditable ones: provider_options,
+# thinking, textVerbosity, variant, reasoningEffort, maxTokens,
+# providerOptions — shown as read-only info lines by Task 16).
+_ENTRY_EDITABLE = frozenset(
+    {"model", "reasoning", "temperature", "top_p", "max_tokens"})
+
+# Settings keys that rebuild block["runtime_fallback"] on apply.
+_RUNTIME_FIELDS = ("enabled", "retry_on_errors", "max_fallback_attempts",
+                   "cooldown_seconds")
+
+
+class FormField(NamedTuple):
+    name: str      # form-field grammar: entry → model/reasoning/
+    #               temperature/top_p/max_tokens; settings →
+    #               model_fallback/enabled/retry_on_errors/
+    #               max_fallback_attempts/cooldown_seconds.
+    kind: str      # "text" | "number" | "toggle" | "enum"
+    value: object  # text: str · number: str|None (None ≙ blank) ·
+    #               toggle: bool|None (None ≙ unset) · enum: str|None
+    extra: dict    # number: {"number_kind": parse_number kind} ·
+    #               enum: {"choices": REASONING_CYCLE}
+
+
+@dataclass
+class FormState:
+    fields: list[FormField]
+    cursor: int = 0
+    error: str = ""                      # last apply/validation failure
+    extra_preserved: dict = field(default_factory=dict)
+
+
+def _number_text(value) -> str | None:
+    """Editable text for a number field; None/blank ≙ None (absent)."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if text.strip() else None
+
+
+def build_entry_form(entry: dict | str) -> FormState:
+    """MODEL_ENTRY_FORM state from one chain entry.
+
+    String entry → model text + everything blank.  Dict entry →
+    model/reasoning/numbers prefilled (absent → None ≙ blank; custom
+    reasoning kept raw — ``format_reasoning_custom`` is display
+    only).  ``extra_preserved`` holds every key the form does NOT
+    edit, merged back verbatim on save.
+    """
+    if isinstance(entry, dict):
+        model = entry.get("model")
+        reasoning = entry.get("reasoning")
+        source = entry
+    else:
+        model = entry
+        reasoning = None
+        source = {}
+    fields = [
+        FormField("model", "text", "" if model is None else str(model),
+                  {}),
+        FormField("reasoning", "enum", reasoning,
+                  {"choices": REASONING_CYCLE}),
+        FormField("temperature", "number",
+                  _number_text(source.get("temperature")),
+                  {"number_kind": "temperature"}),
+        FormField("top_p", "number", _number_text(source.get("top_p")),
+                  {"number_kind": "top_p"}),
+        FormField("max_tokens", "number",
+                  _number_text(source.get("max_tokens")),
+                  {"number_kind": "max_tokens"}),
+    ]
+    extra = {key: value for key, value in source.items()
+             if key not in _ENTRY_EDITABLE}
+    return FormState(fields, 0, "", extra)
+
+
+def build_settings_form(harness_block: dict) -> FormState:
+    """SETTINGS_FORM state from the ``[opencode]`` harness block.
+
+    model_fallback toggle from the block; enabled/retry_on_errors/
+    max_fallback_attempts/cooldown_seconds from
+    ``block["runtime_fallback"]`` when it is a dict, else blank.
+    ``extra_preserved`` holds every other harness key (agents,
+    categories, …) — merged back verbatim on save.
+    """
+    runtime = harness_block.get("runtime_fallback")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    retry = runtime.get("retry_on_errors")
+    retry_text = ", ".join(str(v) for v in retry) \
+        if isinstance(retry, list) else ""
+    fields = [
+        FormField("model_fallback", "toggle",
+                  harness_block.get("model_fallback"), {}),
+        FormField("enabled", "toggle", runtime.get("enabled"), {}),
+        FormField("retry_on_errors", "text", retry_text, {}),
+        FormField("max_fallback_attempts", "number",
+                  _number_text(runtime.get("max_fallback_attempts")),
+                  {"number_kind": "max_fallback_attempts"}),
+        FormField("cooldown_seconds", "number",
+                  _number_text(runtime.get("cooldown_seconds")),
+                  {"number_kind": "cooldown_seconds"}),
+    ]
+    extra = {key: value for key, value in harness_block.items()
+             if key not in ("model_fallback", "runtime_fallback")}
+    return FormState(fields, 0, "", extra)
+
+
+def validate_and_collect(form: FormState) -> tuple[dict | None,
+                                                    str | None]:
+    """Validate a form and collect its present values.
+
+    Returns ``(collected, None)`` or ``(None, error_message)``.  The
+    collected dict contains ONLY present values — blank numerics and
+    unset toggles/enums are ABSENT.  Entry form (has a ``model``
+    field): blank model → ``Model ID must not be empty``; numbers via
+    ``parse_number`` (kind-specific messages); reasoning None →
+    absent, in-cycle → string, custom → preserved raw.  Settings
+    form: retry via ``parse_retry_errors``.
+    """
+    names = {f.name for f in form.fields}
+    if "model" in names:
+        return _collect_entry_form(form)
+    return _collect_settings_form(form)
+
+
+def _field_text(value) -> str:
+    return "" if value is None else str(value)
+
+
+def _collect_entry_form(form: FormState) -> tuple[dict | None, str | None]:
+    by_name = {f.name: f for f in form.fields}
+    model = by_name.get("model")
+    model_text = _field_text(model.value) if model is not None else ""
+    if not model_text.strip():
+        return None, "Model ID must not be empty"
+    collected: dict = {"model": model_text}
+    reasoning = by_name.get("reasoning")
+    if reasoning is not None and reasoning.value is not None:
+        collected["reasoning"] = reasoning.value
+    error = _collect_numbers(form, collected)
+    if error is not None:
+        return None, error
+    return collected, None
+
+
+def _collect_settings_form(form: FormState) -> tuple[dict | None,
+                                                     str | None]:
+    by_name = {f.name: f for f in form.fields}
+    collected: dict = {}
+    for name in ("model_fallback", "enabled"):
+        f = by_name.get(name)
+        if f is not None and f.value is not None:   # False counts as set
+            collected[name] = f.value
+    retry = by_name.get("retry_on_errors")
+    if retry is not None:
+        try:
+            values = parse_retry_errors(_field_text(retry.value))
+        except FieldError as exc:
+            return None, str(exc)
+        if values is not None:
+            collected["retry_on_errors"] = values
+    error = _collect_numbers(form, collected)
+    if error is not None:
+        return None, error
+    return collected, None
+
+
+def _collect_numbers(form: FormState, collected: dict) -> str | None:
+    """Parse every number field; blank → absent.  Error message or
+    None."""
+    for f in form.fields:
+        if f.kind != "number":
+            continue
+        try:
+            value = parse_number(
+                _field_text(f.value),
+                kind=f.extra.get("number_kind", f.name))
+        except FieldError as exc:
+            return str(exc)
+        if value is not None:
+            collected[f.name] = value
+    return None
+
+
+def apply_entry_form(item: RouteItem, index: int,
+                     form: FormState) -> OperationResult:
+    """Validate + save the MODEL_ENTRY_FORM into the chain.
+
+    Validation failure → ``(False, error)`` with the form kept open
+    (``form.error`` set) and NO document write.  Success → collected
+    values merged with ``extra_preserved`` (verbatim) into Task 14
+    ``set_entry`` — agent collapse rules apply; ``index == len(chain)``
+    is the past-end append sentinel.
+    """
+    collected, error = validate_and_collect(form)
+    if collected is None:
+        form.error = error or ""
+        return OperationResult(False, form.error)
+    result = set_entry(item, index, {**collected, **form.extra_preserved})
+    form.error = "" if result.ok else result.message
+    return result
+
+
+def apply_settings_form(harness_block: dict,
+                        form: FormState) -> OperationResult:
+    """Validate + save the SETTINGS_FORM onto the harness block.
+
+    ``model_fallback`` written only when the toggle is not None
+    (None ≙ key removed).  ``runtime_fallback`` rebuilt from the set
+    sub-fields ONLY when ≥1 is set (enabled bool counts); all
+    blank/None → the key is removed entirely.  Blank numerics → key
+    absent.  Every other harness key passes through untouched.
+    """
+    collected, error = validate_and_collect(form)
+    if collected is None:
+        form.error = error or ""
+        return OperationResult(False, form.error)
+    if "model_fallback" in collected:
+        harness_block["model_fallback"] = collected["model_fallback"]
+    else:
+        harness_block.pop("model_fallback", None)
+    runtime = {key: value for key, value in collected.items()
+               if key in _RUNTIME_FIELDS}
+    if runtime:
+        harness_block["runtime_fallback"] = runtime
+    else:
+        harness_block.pop("runtime_fallback", None)
+    for key, value in form.extra_preserved.items():
+        harness_block[key] = value
+    form.error = ""
+    return OperationResult(True, "Settings saved")
+
+
+def _cycle_toggle(value) -> bool | None:
+    """True → False → None (unset) → True; anything else → True."""
+    if value is True:
+        return False
+    if value is False:
+        return None
+    return True
+
+
+def handle_form_key(form: FormState, key: str) -> str:
+    """Pure key glue for a FormState (Task 16 routes through this).
+
+    up/down → move cursor (clamped) → "move"; left/right on an enum
+    field → ``cycle_reasoning`` ±1 updates the field → "cycle";
+    space on a toggle field → True→False→None→True → "toggle"; every
+    other key → "none".
+    """
+    if key == "up":
+        if form.cursor > 0:
+            form.cursor -= 1
+        return "move"
+    if key == "down":
+        if form.cursor < len(form.fields) - 1:
+            form.cursor += 1
+        return "move"
+    current = form.fields[form.cursor] if form.fields else None
+    if current is not None and current.kind == "enum" \
+            and key in ("left", "right"):
+        direction = 1 if key == "right" else -1
+        form.fields[form.cursor] = current._replace(
+            value=cycle_reasoning(current.value, direction))
+        return "cycle"
+    if current is not None and current.kind == "toggle" and key == " ":
+        form.fields[form.cursor] = current._replace(
+            value=_cycle_toggle(current.value))
+        return "toggle"
+    return "none"
 
 
 # ── result contract + thin curses shell ───────────────────────────
