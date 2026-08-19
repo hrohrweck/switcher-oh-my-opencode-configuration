@@ -12,10 +12,9 @@ from unittest import mock
 from opencode_config_switcher.config import (
     ConfigSummary, FileSummary, ModelSpec, RouteSummary,
     RuntimeFallbackSummary)
-from opencode_config_switcher.switching import ApplyResult, ApplyStatus
 from opencode_config_switcher.tui import (
-    TuiOutcome, TuiResult, run_tui, AppState, LayoutMode,
-    _safe_addstr, _draw_acs_border, _draw_ascii_border,
+    ApplyResult, ApplyStatus, TuiOutcome, TuiResult, run_tui, AppState,
+    LayoutMode, _safe_addstr, _draw_acs_border, _draw_ascii_border,
     )
 import opencode_config_switcher.tui as tui_mod
 

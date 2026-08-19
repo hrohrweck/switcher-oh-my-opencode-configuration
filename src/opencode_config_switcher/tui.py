@@ -14,7 +14,12 @@ from enum import Enum, auto
 from typing import Callable
 
 from opencode_config_switcher.config import ConfigSummary, ModelSpec
-from opencode_config_switcher.switching import ApplyResult, ApplyStatus
+from opencode_config_switcher.engine import UseResult, UseStatus
+
+# v3 compat shim (switching.py was removed in Task 8): the renderer below
+# still speaks the v2 Apply* names.  Task 12 owns the full rework.
+ApplyResult = UseResult
+ApplyStatus = UseStatus
 
 
 # ── display-width helpers ──────────────────────────────────────────

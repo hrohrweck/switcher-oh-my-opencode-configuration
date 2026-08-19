@@ -6,10 +6,8 @@ from unittest import mock
 
 from opencode_config_switcher.config import (
     ConfigSummary, FileSummary, ModelSpec, RouteSummary)
-from opencode_config_switcher.switching import (
-    ApplyResult, ApplyStatus, ApplyStage)
 from opencode_config_switcher.tui import (
-    TuiOutcome, TuiResult, run_tui,
+    ApplyResult, ApplyStatus, TuiOutcome, TuiResult, run_tui,
     )
 
 
