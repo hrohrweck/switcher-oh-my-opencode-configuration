@@ -1,0 +1,15 @@
+// leading line comment before the object
+{
+  // comment before a key
+  "alpha": 1, // comment after a value
+  /* block comment
+     spanning multiple
+     lines */
+  "beta": [
+    // comment inside array before element
+    2,
+    3 /* inline block after element */
+  ],
+  "gamma": /* value-preceding block */ true
+}
+// trailing comment after the object
