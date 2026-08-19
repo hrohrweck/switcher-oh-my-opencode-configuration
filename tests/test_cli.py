@@ -1201,5 +1201,263 @@ class LifecycleTests(unittest.TestCase):
             "(from oh-my-openagent-cost-efficient.json)\n")
 
 
+# ── Task 10: replace-model + help finalization ─────────────────────
+
+RICH_DOC = {
+    "$schema": SCHEMA,
+    "[opencode]": {
+        "agents": {
+            "build": {
+                "model": "old/model",
+                "fallback_models": [
+                    "old/model",
+                    {"model": "old/model", "reasoning": "high"},
+                ],
+            }
+        },
+        "categories": {"fast": {"models": ["old/model"]}},
+        "models": {"primary": "old/model"},
+    },
+}
+RICH_TEXT = jsonc_dumps(RICH_DOC)
+RICH_REPLACED_TEXT = jsonc_dumps(json.loads(json.dumps(RICH_DOC)
+                                            .replace('"old/model"',
+                                                     '"new/model"')))
+RICH_PREVIEW_HITS = (
+    "  [opencode].build.model\n"
+    "  [opencode].build.fallback_models[0]\n"
+    "  [opencode].build.fallback_models[1]\n"
+    "  [opencode].fast.models[0]\n"
+    "  [opencode].catalog:primary\n"
+)
+
+
+class ReplaceModelProfileTests(unittest.TestCase):
+    def test_dry_run_prints_exact_hits_and_writes_nothing(self):
+        with _home_with({"rich": RICH_TEXT}) as home:
+            profile = home / ".omo" / "profiles" / "rich.jsonc"
+            before_bytes = profile.read_bytes()
+            before_stat = profile.stat()
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--profile", "rich", "--dry-run"], home=home)
+            after_bytes = profile.read_bytes()
+            after_stat = profile.stat()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(
+            proc.stdout,
+            "Would replace in profile 'rich':\n" + RICH_PREVIEW_HITS)
+        self.assertEqual(after_bytes, before_bytes)
+        self.assertEqual(after_stat.st_mtime_ns, before_stat.st_mtime_ns)
+        self.assertEqual(after_stat.st_size, before_stat.st_size)
+
+    def test_dry_run_zero_hits_prints_no_matches(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["replace-model", "zz/zz", "n/n",
+                             "--profile", "alpha", "--dry-run"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(
+            proc.stdout,
+            "Would replace in profile 'alpha':\n  no matches\n")
+
+    def test_dry_run_missing_profile_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--profile", "nope", "--dry-run"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile 'nope' not found\n")
+        self.assertEqual(proc.stdout, "")
+
+    def test_apply_on_active_profile_re_renders_omo_jsonc(self):
+        with _home_with({"rich": RICH_TEXT}) as home:
+            paths = Paths.build(home)
+            use_profile(paths, "rich")
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--profile", "rich"], home=home)
+            profile_text = (paths.profiles_dir / "rich.jsonc").read_text(
+                encoding="utf-8")
+            backup_text = (paths.profiles_dir / "rich.jsonc.BAK").read_text(
+                encoding="utf-8")
+            omo_text = paths.omo_path.read_text(encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Replaced 5 model reference(s) in profile 'rich'"
+            "; re-rendered active configuration\n")
+        self.assertEqual(profile_text, RICH_REPLACED_TEXT)
+        self.assertEqual(backup_text, RICH_TEXT)
+        self.assertIn("new/model", omo_text)
+        self.assertNotIn("old/model", omo_text)
+        self.assertIn('"reasoning": "high"', omo_text)
+
+    def test_apply_on_inactive_profile_leaves_omo_jsonc_untouched(self):
+        with _home_with({"rich": RICH_TEXT, "beta": BETA_TEXT},
+                        omo_text=LIVE_TEXT) as home:
+            live_before = (home / ".omo" / "omo.jsonc").read_bytes()
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--profile", "rich"], home=home)
+            live_after = (home / ".omo" / "omo.jsonc").read_bytes()
+            profile_text = (home / ".omo" / "profiles" /
+                            "rich.jsonc").read_text(encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout, "Replaced 5 model reference(s) in profile 'rich'\n")
+        self.assertEqual(live_after, live_before)
+        self.assertEqual(profile_text, RICH_REPLACED_TEXT)
+
+    def test_no_matches_apply_exits_1(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["replace-model", "zz/zz", "n/n",
+                             "--profile", "alpha"], home=home)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(
+            proc.stderr, "No matches for model 'zz/zz' in profile 'alpha'\n")
+        self.assertEqual(proc.stdout, "")
+
+    def test_missing_profile_apply_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--profile", "nope"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile 'nope' not found\n")
+        self.assertEqual(proc.stdout, "")
+
+    def test_invalid_profile_apply_exits_2(self):
+        with _home_with({"broken": BROKEN_TEXT}) as home:
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--profile", "broken"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertTrue(proc.stderr.startswith(
+            "Cannot apply invalid profile: broken:"), proc.stderr)
+
+    def test_invalid_profile_name_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "a/b", "c/d",
+                             "--profile", "x/y"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Invalid profile name: 'x/y'\n")
+
+
+class ReplaceModelAllTests(unittest.TestCase):
+    STORE = {"beta": BETA_TEXT, "broken": BROKEN_TEXT, "rich": RICH_TEXT}
+
+    def test_apply_across_hit_miss_invalid(self):
+        with _home_with(dict(self.STORE)) as home:
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--all"], home=home)
+            rich_text = (home / ".omo" / "profiles" / "rich.jsonc").read_text(
+                encoding="utf-8")
+            beta_text = (home / ".omo" / "profiles" / "beta.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "beta: no matches\n"
+            "Replaced 5 model reference(s) in profile 'rich'\n"
+            "Replaced in 1/3 profile(s)\n")
+        self.assertEqual(proc.stderr.count("\n"), 1)
+        self.assertTrue(proc.stderr.startswith(
+            "broken: Cannot apply invalid profile: broken:"), proc.stderr)
+        self.assertEqual(rich_text, RICH_REPLACED_TEXT)
+        self.assertEqual(beta_text, BETA_TEXT)
+
+    def test_dry_run_across_all(self):
+        with _home_with(dict(self.STORE)) as home:
+            rich = home / ".omo" / "profiles" / "rich.jsonc"
+            before = rich.read_bytes()
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--all", "--dry-run"], home=home)
+            after = rich.read_bytes()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "beta: no matches\n"
+            "Would replace in profile 'rich':\n" + RICH_PREVIEW_HITS +
+            "Previewed in 1/3 profile(s)\n")
+        self.assertEqual(proc.stderr.count("\n"), 1)
+        self.assertTrue(proc.stderr.startswith(
+            "broken: Cannot apply invalid profile: broken:"), proc.stderr)
+        self.assertEqual(after, before)
+
+    def test_all_no_hits_anywhere_exits_1(self):
+        with _home_with({"alpha": ALPHA_TEXT, "beta": BETA_TEXT}) as home:
+            proc = _run_cli(["replace-model", "zz/zz", "n/n", "--all"],
+                            home=home)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(
+            proc.stdout,
+            "alpha: no matches\n"
+            "beta: no matches\n"
+            "Replaced in 0/2 profile(s)\n")
+        self.assertEqual(proc.stderr, "")
+
+    def test_all_empty_store_exits_1(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "a/b", "c/d", "--all"],
+                            home=home)
+            profiles_dir = home / ".omo" / "profiles"
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(
+            proc.stderr,
+            f"No profiles found in {profiles_dir}\n{HINT}\n")
+
+
+class ReplaceModelUsageTests(unittest.TestCase):
+    def test_both_target_flags_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "old/model", "new/model",
+                             "--profile", "rich", "--all"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("usage", proc.stderr)
+        self.assertIn("not allowed with argument", proc.stderr)
+
+    def test_neither_target_flag_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "old/model", "new/model"],
+                            home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("usage", proc.stderr)
+        self.assertIn(
+            "one of the arguments --profile --all is required", proc.stderr)
+
+    def test_missing_positionals_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "--all"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("usage", proc.stderr)
+
+
+class HelpFinalizationTests(unittest.TestCase):
+    COMMANDS = ["list", "show", "active", "use", "select",
+                "create", "delete", "import", "replace-model"]
+
+    def test_every_subcommand_help_exits_0(self):
+        with _home_with() as home:
+            for command in self.COMMANDS:
+                with self.subTest(command=command):
+                    proc = _run_cli([command, "--help"], home=home)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn("usage", proc.stdout)
+
+    def test_replace_model_help_lists_positionals_and_flags(self):
+        with _home_with() as home:
+            proc = _run_cli(["replace-model", "--help"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("OLD", proc.stdout)
+        self.assertIn("NEW", proc.stdout)
+        self.assertIn("--profile", proc.stdout)
+        self.assertIn("--all", proc.stdout)
+        self.assertIn("--dry-run", proc.stdout)
+
+    def test_top_level_help_mentions_every_subcommand(self):
+        with _home_with() as home:
+            proc = _run_cli(["--help"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for name in self.COMMANDS:
+            self.assertIn(name, proc.stdout, name)
+
+
 if __name__ == "__main__":
     unittest.main()

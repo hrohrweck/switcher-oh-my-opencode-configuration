@@ -18,9 +18,12 @@ from pathlib import Path
 from opencode_config_switcher import __version__
 from opencode_config_switcher.config import parse_all
 from opencode_config_switcher.engine import (
+    ReplaceResult,
     UseResult,
     UseStatus,
     capture_current,
+    replace_model_all,
+    replace_model_in_profile,
     use_profile,
 )
 from opencode_config_switcher.paths import Paths
@@ -115,6 +118,18 @@ def _build_parser() -> _Parser:
                           default=None, metavar="NAME",
                           help="import the live omo.jsonc "
                                "(default name 'current')")
+    replacer = sub.add_parser(
+        "replace-model", parents=[_VERSION_PARENT],
+        help="replace a model ID in stored profiles")
+    replacer.add_argument("old", metavar="OLD", help="model ID to replace")
+    replacer.add_argument("new", metavar="NEW", help="replacement model ID")
+    target = replacer.add_mutually_exclusive_group(required=True)
+    target.add_argument("--profile", metavar="NAME",
+                        help="replace in this one profile")
+    target.add_argument("--all", dest="all_profiles", action="store_true",
+                        help="replace in every stored profile")
+    replacer.add_argument("--dry-run", dest="dry_run", action="store_true",
+                          help="preview matching routes without writing")
     return parser
 
 
@@ -187,13 +202,6 @@ def _cmd_active(paths: Paths, args: argparse.Namespace) -> int:
                 print(f"custom (configuration drifted from '{name}')")
             return 0
     print("custom (no profile active)")
-    return 0
-
-
-    print(f"Deleted profile: {args.name} (backup: {backup})")
-    if was_active:
-        clear_active(paths)
-        print("No profile is active now.")
     return 0
 
 
@@ -413,6 +421,72 @@ def _import_legacy_file(paths: Paths, source: Path, *,
     return 0
 
 
+# ── replace-model (Task 10; Task 16's r-form reuses the hit grammar) ──
+
+def _replace_hit_lines(result: ReplaceResult) -> list[str]:
+    """`  {section}.{route}.{field}` per hit; empty route collapses."""
+    return [
+        f"  {hit.section}.{hit.route}.{hit.field}" if hit.route
+        else f"  {hit.section}.{hit.field}"
+        for hit in result.hits
+    ]
+
+
+def _print_replace_preview(result: ReplaceResult) -> None:
+    print(f"Would replace in profile '{result.profile}':")
+    lines = _replace_hit_lines(result)
+    if not lines:
+        print("  no matches")
+        return
+    for line in lines:
+        print(line)
+
+
+def _cmd_replace_model(paths: Paths, args: argparse.Namespace) -> int:
+    if args.all_profiles:
+        return _replace_model_across_profiles(paths, args)
+    result = replace_model_in_profile(
+        paths, args.profile, args.old, args.new, dry_run=args.dry_run)
+    if args.dry_run:
+        if result.status == UseStatus.BLOCKED:
+            print(result.message, file=sys.stderr)
+            return 2
+        _print_replace_preview(result)
+        return 0
+    if result.status == UseStatus.APPLIED:
+        print(result.message)
+        return 0
+    if result.status == UseStatus.BLOCKED:
+        print(result.message, file=sys.stderr)
+        return 2
+    print(result.message, file=sys.stderr)
+    return 1
+
+
+def _replace_model_across_profiles(paths: Paths,
+                                   args: argparse.Namespace) -> int:
+    outcomes = replace_model_all(paths, args.old, args.new,
+                                 dry_run=args.dry_run)
+    if not outcomes:
+        _report_empty_store(paths)
+        return 1
+    with_hits = 0
+    for name, result in outcomes:
+        if result.status in (UseStatus.PREVIEW, UseStatus.APPLIED):
+            if result.status == UseStatus.PREVIEW:
+                _print_replace_preview(result)
+            else:
+                print(result.message)
+            with_hits += 1
+        elif result.status == UseStatus.NO_MATCHES:
+            print(f"{name}: no matches")
+        else:
+            print(f"{name}: {result.message}", file=sys.stderr)
+    verb = "Previewed" if args.dry_run else "Replaced"
+    print(f"{verb} in {with_hits}/{len(outcomes)} profile(s)")
+    return 0 if with_hits else 1
+
+
 _HANDLERS = {
     "list": _cmd_list,
     "show": _cmd_show,
@@ -422,6 +496,7 @@ _HANDLERS = {
     "create": _cmd_create,
     "delete": _cmd_delete,
     "import": _cmd_import,
+    "replace-model": _cmd_replace_model,
 }
 
 
