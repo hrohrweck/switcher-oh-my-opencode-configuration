@@ -1,28 +1,78 @@
-"""Pure TUI layout, state transitions, and structured formatting.
+# allow: SIZE_OK — plan-pinned single-module TUI: pure core + thin curses
+# shell (v2 architecture kept for Task 12's selector rework).
+"""Pure TUI layout, state transitions, and footer/prompt formatting.
 
-Also provides the curses renderer shell and typed result contracts.
+v3 profile selector.  The curses renderer shell speaks
+:class:`tui_data.ProfileSummary` rows (menu via ``tui_data.menu_row``,
+details via ``tui_data.format_details``, raw overlay via the record's
+cached ``raw_text``) over the injected :class:`SelectorServices` seams —
+the selector itself performs ZERO file I/O; the CLI adapter (Task 16)
+wires the real engine/store functions.
+
+Contracts (binding for Task 16):
+
+- ``run_profile_tui(summaries, paths, services) -> TuiResult`` —
+  ``paths`` is carried for context only; every mutating action goes
+  through ``services``.  Enter calls ``services.use_fn(name)``:
+  APPLIED/NOOP exit the TUI returning a :class:`TuiResult` whose
+  ``apply_result`` carries the engine :class:`UseResult` (the CLI owns
+  all post-curses printing); BLOCKED/FAILED keep the TUI interactive
+  with ``result.message`` in the footer.
+- ``SelectorServices(use_fn, create_fn, delete_fn, refresh_fn)`` —
+  ``create_fn``/``delete_fn`` raise store exceptions
+  (``InvalidProfileName`` / ``ProfileExistsError`` /
+  ``ProfileNotFoundError``) which the selector turns into footer
+  status lines; ``refresh_fn()`` returns a fresh ``list[ProfileSummary]``
+  which REPLACES the menu (selection clamped).
+- ``EDITOR_AVAILABLE = False`` gates the ``e``/``i``/``r`` keys AND
+  their footer advertisement; Task 16 flips it and wires the intents
+  (``edit`` / ``import`` / ``replace``) which are already routed
+  through :func:`handle_key`.
+- Prompt footers (pinned): create label ``"New profile name: "``;
+  delete label ``"Delete profile '{name}'? [y/N]: "``; success
+  ``"Profile created: {name}"`` / ``"Deleted profile: {name}"``;
+  failures ``"Profile name must not be empty"``,
+  ``str(InvalidProfileName)``, ``"Profile already exists: {name}"``,
+  ``"Profile '{name}' not found"``; decline ``"Delete cancelled"``;
+  empty-store guard ``"No profiles"``.
+- ``display_width`` / ``truncate_display`` are byte-identical v2
+  helpers (tui_data imports them).
 """
 
 import curses
-import json
 import locale
 import os
 import signal
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable
+from typing import Callable, NamedTuple
 
-from opencode_config_switcher.config import ConfigSummary, ModelSpec
+from opencode_config_switcher import __version__
 from opencode_config_switcher.engine import UseResult, UseStatus
+from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.profiles import (
+    InvalidProfileName,
+    ProfileExistsError,
+    ProfileNotFoundError,
+)
 
-# v3 compat shim (switching.py was removed in Task 8): the renderer below
-# still speaks the v2 Apply* names.  Task 12 owns the full rework.
-ApplyResult = UseResult
-ApplyStatus = UseStatus
+__all__ = [
+    "display_width", "truncate_display",
+    "LayoutMode", "compute_layout", "left_width", "NarrowPane",
+    "AppState", "handle_key",
+    "CREATE_PROMPT_LABEL", "delete_prompt_label", "compose_footer",
+    "TuiOutcome", "TuiResult",
+    "SelectorServices", "run_profile_tui", "EDITOR_AVAILABLE",
+    "_safe_addstr", "_draw_acs_border", "_draw_ascii_border",
+]
+
+# Task 16 flips this to True when the editor/import/replace screens
+# land; while False the keys are inert AND hidden from the footer.
+EDITOR_AVAILABLE = False
 
 
-# ── display-width helpers ──────────────────────────────────────────
+# ── display-width helpers (byte-identical v2; tui_data imports) ────
 
 def display_width(text: str) -> int:
     """Compute the display width of *text*, handling CJK and combining marks."""
@@ -95,7 +145,15 @@ class NarrowPane(Enum):
 
 @dataclass
 class AppState:
-    """Mutable TUI application state."""
+    """Mutable TUI application state.
+
+    ``prompt`` is ``None`` (no prompt) or one of ``"create"`` /
+    ``"delete"``; while set, every printable key is captured into
+    ``prompt_buffer`` (rendered after ``prompt_label``), Enter submits,
+    Esc/Ctrl-C/Ctrl-D cancel.  ``status`` is the transient footer
+    message (engine/create/delete results).
+    """
+
     selected_idx: int = 0
     config_count: int = 0
     menu_offset: int = 0
@@ -104,6 +162,9 @@ class AppState:
     detail_raw: bool = False
     status: str | None = None
     layout: LayoutMode = LayoutMode.NARROW
+    prompt: str | None = None
+    prompt_label: str = ""
+    prompt_buffer: str = ""
 
     def clamp(self) -> None:
         """Clamp all indices after config change or resize."""
@@ -124,17 +185,45 @@ class AppState:
 def handle_key(state: AppState, key: str) -> str | None:
     """Apply *key* to *state* and return an intent string or None.
 
-    Valid intents: 'quit', 'apply'.
+    Valid intents: 'quit', 'apply', 'create', 'delete', 'edit',
+    'import', 'replace', 'prompt_submit'.  While ``state.prompt`` is
+    set, keys are captured into the prompt buffer instead of driving
+    navigation (q/Ctrl-D are CHARACTERS there; Esc/Ctrl-C cancel).
     """
+    # Prompt mode captures everything except submit/cancel.
+    if state.prompt is not None:
+        if key == "enter":
+            return "prompt_submit"
+        if key in ("esc", "ctrlc", "ctrld"):
+            state.prompt = None
+            state.prompt_label = ""
+            state.prompt_buffer = ""
+            return None
+        if key == "backspace":
+            state.prompt_buffer = state.prompt_buffer[:-1]
+            return None
+        if len(key) == 1:
+            state.prompt_buffer += key
+            return None
+        return None
+
     lm = state.layout
 
     # Universal quit keys
     if key in ("q", "ctrlc", "ctrld"):
         return "quit"
 
-    # TOO_SMALL: only quit allowed (already handled above), everything else ignored
+    # TOO_SMALL: only quit allowed (already handled above)
     if lm == LayoutMode.TOO_SMALL:
         return None
+
+    # v3 selector actions (available in every non-TOO_SMALL mode)
+    if key == "n":
+        return "create"
+    if key == "D":
+        return "delete"
+    if key in ("e", "i", "r") and EDITOR_AVAILABLE:
+        return {"e": "edit", "i": "import", "r": "replace"}[key]
 
     # WIDE mode — root
     if lm == LayoutMode.WIDE:
@@ -197,120 +286,42 @@ def handle_key(state: AppState, key: str) -> str | None:
     return None
 
 
-# ── formatting ────────────────────────────────────────────────────
+# ── footer / prompt formatting (pure) ─────────────────────────────
 
-def _format_model(m: ModelSpec) -> str:
-    parts = [m.model or "not configured"]
-    if m.variant:
-        parts.append(f"[{m.variant}]")
-    elif m.reasoning:
-        parts.append(f"(reasoning: {m.reasoning})")
-    elif m.reasoning_effort:
-        parts.append(f"(effort: {m.reasoning_effort})")
-    return " ".join(parts)
+CREATE_PROMPT_LABEL = "New profile name: "
 
 
-def format_details(summary: ConfigSummary, width: int) -> list[str]:
-    """Format a ConfigSummary into display lines for the details pane."""
-    lines: list[str] = []
-    w = max(width, 1)
-    f = summary.file
+def delete_prompt_label(name: str) -> str:
+    """The inline delete-confirmation footer label."""
+    return f"Delete profile '{name}'? [y/N]: "
 
-    # File section
-    lines.append(f"File: {truncate_display(str(f.path), w - 6)}")
-    lines.append(f"Name: {f.name}")
-    status_str = "CURRENT " if f.is_current else ""
-    if summary.is_valid:
-        status_str += "VALID"
+
+def _mode_footer(state: AppState) -> str:
+    if state.layout == LayoutMode.TOO_SMALL:
+        return "q/Ctrl-C quit"
+    if state.layout == LayoutMode.WIDE:
+        footer = ("Up/Down: select  d: raw  Enter: use  "
+                  "n: new  D: delete  q: quit")
+    elif state.narrow_pane == NarrowPane.MENU:
+        footer = ("Up/Down: select  Tab: Details  Enter: use  "
+                  "n: new  D: delete  q: quit")
     else:
-        status_str += "INVALID"
-    lines.append(f"Status: {status_str}")
-    if f.size_bytes is not None:
-        lines.append(f"Size: {f.size_bytes} bytes")
-    if summary.error:
-        lines.append(f"Error: {summary.error}")
-
-    # Schema / fallback policy
-    if summary.schema:
-        lines.append(f"Schema: {truncate_display(summary.schema, w - 8)}")
-    lines.append(f"Model Fallback: {summary.model_fallback}")
-
-    # Runtime fallback
-    rf = summary.runtime_fallback
-    lines.append(f"Runtime Fallback: enabled={rf.enabled}")
-    if rf.retry_on_errors:
-        lines.append(f"  Retry on: {rf.retry_on_errors}")
-    if rf.max_fallback_attempts is not None:
-        lines.append(f"  Max attempts: {rf.max_fallback_attempts}")
-    if rf.cooldown_seconds is not None:
-        lines.append(f"  Cooldown: {rf.cooldown_seconds}s")
-    for key, val in rf.additional:
-        lines.append(f"  {key}: {val}")
-
-    # Additional settings
-    if summary.additional_settings:
-        lines.append("Additional Settings:")
-        for key, val in summary.additional_settings:
-            if isinstance(val, (str, int, float, bool, type(None))):
-                lines.append(f"  {key}: {val!r}")
-            elif isinstance(val, list):
-                lines.append(f"  {key}: [list, {len(val)} items]")
-            elif isinstance(val, dict):
-                lines.append(f"  {key}: {{object, {len(val)} keys}}")
-            else:
-                lines.append(f"  {key}: {type(val).__name__}")
-
-    # Agents
-    if not summary.agents and not summary.categories:
-        lines.append("")
-        lines.append("Agents: none configured")
-        lines.append("Categories: none configured")
-    else:
-        if summary.agents:
-            lines.append(f"Agents ({len(summary.agents)}):")
-            for route in summary.agents:
-                lines.append(f"  {route.name}: {_format_model(route.primary)}")
-                for i, fb in enumerate(route.fallbacks, 1):
-                    lines.append(f"    [{i}] {_format_model(fb)}")
-                for warn in route.warnings:
-                    lines.append(f"    ! {warn}")
-
-        if summary.categories:
-            lines.append(f"Categories ({len(summary.categories)}):")
-            for route in summary.categories:
-                lines.append(f"  {route.name}: {_format_model(route.primary)}")
-                for i, fb in enumerate(route.fallbacks, 1):
-                    lines.append(f"    [{i}] {_format_model(fb)}")
-                for warn in route.warnings:
-                    lines.append(f"    ! {warn}")
-
-    # Global warnings
-    for warn_msg in summary.warnings:
-        lines.append(f"! {warn_msg}")
-
-    # Truncate each line to width
-    return [truncate_display(line, w) for line in lines]
+        footer = ("Up/Down/PgUp/PgDn: scroll  Tab: Menu  "
+                  "d: raw  Enter: use  q: quit")
+    if EDITOR_AVAILABLE:
+        footer += "  e: edit  i: import  r: replace"
+    return footer
 
 
-def format_overlay(raw_text: str, width: int) -> list[str]:
-    """Format raw JSON text for the overlay pane (vertical scroll only)."""
-    lines = raw_text.splitlines()
-    return [truncate_display(line, width) for line in lines]
-
-
-# ── display helpers ────────────────────────────────────────────────
-
-_DISPLAY_PREFIXES = ("oh-my-openagent-", "oh-my-opencode-")
-
-
-def display_config_name(name: str) -> str:
-    for prefix in _DISPLAY_PREFIXES:
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-            break
-    if name.endswith(".json"):
-        name = name[:-len(".json")]
-    return name
+def compose_footer(state: AppState) -> str:
+    """Footer line: the active prompt, else status, else mode hints."""
+    if state.prompt is not None:
+        return state.prompt_label + state.prompt_buffer
+    if state.layout == LayoutMode.TOO_SMALL:
+        return _mode_footer(state)
+    if state.status:
+        return f"{state.status}  |  {_mode_footer(state)}"
+    return _mode_footer(state)
 
 
 # ── TUI result contracts ──────────────────────────────────────────
@@ -326,16 +337,30 @@ class TuiOutcome(str, Enum):
 @dataclass(frozen=True)
 class TuiResult:
     outcome: TuiOutcome
-    apply_result: ApplyResult | None = None
+    apply_result: UseResult | None = None
     error_type: str | None = None
     error_message: str | None = None
     signal_number: int | None = None
 
 
-# ── curses renderer ───────────────────────────────────────────────
+# ── injected service seams ────────────────────────────────────────
 
-_ApplyFn = Callable[[object, object, object], ApplyResult]
+class SelectorServices(NamedTuple):
+    """Every mutating action the selector can perform.
 
+    ``use_fn(name) -> UseResult``; ``create_fn(name)`` /
+    ``delete_fn(name)`` raise store exceptions which become footer
+    status lines; ``refresh_fn() -> list[ProfileSummary]`` rebuilds the
+    menu after a mutation (selection is clamped to the new list).
+    """
+
+    use_fn: Callable[[str], UseResult]
+    create_fn: Callable[[str], object]
+    delete_fn: Callable[[str], object]
+    refresh_fn: Callable[[], list]
+
+
+# ── curses renderer shell ─────────────────────────────────────────
 
 def _safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
     """Write *text* at (y, x) without triggering curses.error on overflow."""
@@ -391,6 +416,18 @@ def _color_attrs() -> dict[str, int]:
     }
 
 
+def _badge_attr(badge: str, attrs: dict[str, int]) -> int:
+    """Palette role per menu badge: INVALID red+bold, ACTIVE green,
+    CUSTOM yellow."""
+    if badge == "INVALID":
+        return attrs["red"] | attrs["bold"]
+    if badge == "ACTIVE":
+        return attrs["green"]
+    if badge == "CUSTOM":
+        return attrs["yellow"]
+    return attrs["normal"]
+
+
 # -- injection seam for unit-testing border drawing
 _draw_border = None
 
@@ -418,12 +455,71 @@ def _draw_ascii_border(win) -> None:
         _safe_addstr(win, max_y - 1, 0, "+" + "-" * (max_x - 2) + "+")
 
 
-def run_tui(configs: list[ConfigSummary],
-            apply_fn: _ApplyFn) -> TuiResult:
-    """Launch the full-screen curses selector and return a TuiResult.
+def _decode_prompt_buffer(text: str) -> str:
+    """Rejoin UTF-8 multibyte input delivered as per-byte getch keys."""
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
 
-    Must be called when stdin/stdout are TTYs.  Handles resize,
-    colors, signals, and terminal cleanup automatically.
+
+def _refresh_menu(state: AppState, box: dict,
+                  services: SelectorServices) -> None:
+    """Replace the summary list via ``refresh_fn`` and clamp selection."""
+    box["summaries"] = list(services.refresh_fn())
+    state.config_count = len(box["summaries"])
+    state.clamp()
+
+
+def _submit_prompt(state: AppState, box: dict,
+                   services: SelectorServices) -> None:
+    """Act on the submitted prompt buffer; see module docstring."""
+    raw = _decode_prompt_buffer(state.prompt_buffer)
+    if state.prompt == "create":
+        name = raw.strip()
+        if not name:
+            state.status = "Profile name must not be empty"
+        else:
+            try:
+                services.create_fn(name)
+            except InvalidProfileName as exc:
+                state.status = str(exc)
+            except ProfileExistsError as exc:
+                state.status = str(exc)
+            else:
+                _refresh_menu(state, box, services)
+                state.status = f"Profile created: {name}"
+    elif state.prompt == "delete":
+        if raw.strip().lower() == "y":
+            summaries = box["summaries"]
+            if state.selected_idx >= len(summaries):
+                state.status = "No profiles"
+            else:
+                name = summaries[state.selected_idx].record.name
+                try:
+                    services.delete_fn(name)
+                except ProfileNotFoundError:
+                    state.status = f"Profile '{name}' not found"
+                except InvalidProfileName as exc:
+                    state.status = str(exc)
+                else:
+                    _refresh_menu(state, box, services)
+                    state.status = f"Deleted profile: {name}"
+        else:
+            state.status = "Delete cancelled"
+    state.prompt = None
+    state.prompt_label = ""
+    state.prompt_buffer = ""
+
+
+def run_profile_tui(summaries: list,
+                    paths: Paths,
+                    services: SelectorServices) -> TuiResult:
+    """Launch the full-screen profile selector; see module docstring.
+
+    Must be called when stdin/stdout are TTYs.  Handles resize, colors,
+    signals, and terminal cleanup automatically.  ``paths`` is carried
+    for context only — all mutations flow through ``services``.
     """
     locale.setlocale(locale.LC_ALL, "")
 
@@ -445,18 +541,26 @@ def run_tui(configs: list[ConfigSummary],
             pass
 
     def _inner(stdscr) -> TuiResult:
-        curses.curs_set(0)
+        # tui_data imports tui (display helpers) — import lazily here.
+        from opencode_config_switcher.tui_data import (
+            format_details, format_raw, menu_row, state_badge)
+
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         _init_colors()
         attrs = _color_attrs()
         stdscr.keypad(True)
 
-        state = AppState(config_count=len(configs))
+        box: dict = {"summaries": list(summaries)}
+        state = AppState(config_count=len(box["summaries"]))
         state.clamp()
 
         while True:
             # Check signal result
             if sig_result[0] is not None:
-                sig_num, sig_name = sig_result[0]
+                sig_num, _sig_name = sig_result[0]
                 return TuiResult(
                     TuiOutcome.TERMINATED,
                     signal_number=sig_num)
@@ -464,15 +568,18 @@ def run_tui(configs: list[ConfigSummary],
             max_y, max_x = stdscr.getmaxyx()
             state.layout = compute_layout(max_x, max_y)
             stdscr.clear()
+            try:
+                curses.curs_set(1 if state.prompt else 0)
+            except curses.error:
+                pass
 
             if state.layout == LayoutMode.TOO_SMALL:
                 _safe_addstr(stdscr, max_y // 2, max_x // 2 - 10,
                              f"Terminal too small ({max_x}x{max_y}). "
                              f"Need 40x12 minimum.",
                              attrs["red"])
-                footer = "q/Ctrl-C quit"
                 _safe_addstr(stdscr, max_y - 1, 0,
-                             footer, attrs["bold"])
+                             compose_footer(state), attrs["bold"])
                 stdscr.refresh()
 
                 key = stdscr.getch()
@@ -483,16 +590,7 @@ def run_tui(configs: list[ConfigSummary],
                     continue
                 continue
 
-            # Build menu list
-            menu = []
-            for i, cfg in enumerate(configs):
-                markers = ""
-                if cfg.file.is_current:
-                    markers += " [current]"
-                if not cfg.is_valid:
-                    markers += " [invalid]"
-                menu.append((display_config_name(cfg.file.name),
-                             markers, i))
+            current = box["summaries"]
 
             # Layout calculations
             if state.layout == LayoutMode.WIDE:
@@ -507,7 +605,7 @@ def run_tui(configs: list[ConfigSummary],
 
             # Header
             _safe_addstr(stdscr, 0, 0,
-                         "OpenCode Configuration Switcher v2.0.0",
+                         f"OpenCode Configuration Switcher v{__version__}",
                          attrs["cyan"] | attrs["bold"])
             _safe_addstr(stdscr, 1, 0,
                          "─" * (max_x - 1), attrs["cyan"])
@@ -515,7 +613,7 @@ def run_tui(configs: list[ConfigSummary],
                 detail_label = (" Details (raw)" if state.detail_raw
                                 else " Details")
                 _safe_addstr(stdscr, 2, 0,
-                             " Configurations" + " " * (lw - 16)
+                             " Profiles" + " " * (lw - 10)
                              + "│" + detail_label,
                              attrs["bold"])
             else:
@@ -529,17 +627,22 @@ def run_tui(configs: list[ConfigSummary],
                              f" [{mode_label}]  Tab to switch",
                              attrs["bold"])
 
+            def _menu_row_text(summary, width: int) -> tuple[str, int]:
+                """(row text, attr) — badge color unless selected."""
+                display = menu_row(summary, width)
+                return f" {display}", state_badge(summary)
+
             # Content
             if state.layout == LayoutMode.WIDE:
                 # Menu (left)
                 for r in range(visible_menu):
                     idx = state.menu_offset + r
-                    if idx >= len(menu):
+                    if idx >= len(current):
                         break
-                    name, markers, cfg_i = menu[idx]
-                    is_sel = cfg_i == state.selected_idx
-                    text = (f" {name}{markers}")
-                    attr = attrs["reverse"] if is_sel else attrs["normal"]
+                    text, badge = _menu_row_text(current[idx], lw - 2)
+                    is_sel = idx == state.selected_idx
+                    attr = (attrs["reverse"] if is_sel
+                            else _badge_attr(badge, attrs))
                     if is_sel:
                         text = text.ljust(lw)
                     _safe_addstr(stdscr, HEADER_ROWS + r, 0, text, attr)
@@ -549,11 +652,11 @@ def run_tui(configs: list[ConfigSummary],
                     _safe_addstr(stdscr, y, lw, "│", attrs["cyan"])
 
                 # Details (right)
-                if state.selected_idx < len(configs):
-                    selected = configs[state.selected_idx]
-                    if state.detail_raw and selected.file.raw_text:
-                        d_lines = format_overlay(
-                            selected.file.raw_text, detail_w - 1)
+                if state.selected_idx < len(current):
+                    selected = current[state.selected_idx]
+                    raw_text = selected.record.raw_text
+                    if state.detail_raw and raw_text:
+                        d_lines = format_raw(raw_text, detail_w - 1)
                     else:
                         d_lines = format_details(selected, detail_w - 1)
                     for r in range(visible_details):
@@ -568,22 +671,23 @@ def run_tui(configs: list[ConfigSummary],
                 if state.narrow_pane == NarrowPane.MENU:
                     for r in range(visible_menu):
                         idx = state.menu_offset + r
-                        if idx >= len(menu):
+                        if idx >= len(current):
                             break
-                        name, markers, cfg_i = menu[idx]
-                        is_sel = cfg_i == state.selected_idx
-                        text = (f" {name}{markers}")
-                        attr = attrs["reverse"] if is_sel else attrs["normal"]
+                        text, badge = _menu_row_text(current[idx],
+                                                     max_x - 2)
+                        is_sel = idx == state.selected_idx
+                        attr = (attrs["reverse"] if is_sel
+                                else _badge_attr(badge, attrs))
                         if is_sel:
                             text = text.ljust(max_x)
                         _safe_addstr(stdscr, HEADER_ROWS + r, 0,
                                      text, attr)
                 else:  # DETAILS
-                    if state.selected_idx < len(configs):
-                        selected = configs[state.selected_idx]
-                        if state.detail_raw and selected.file.raw_text:
-                            d_lines = format_overlay(
-                                selected.file.raw_text, detail_w)
+                    if state.selected_idx < len(current):
+                        selected = current[state.selected_idx]
+                        raw_text = selected.record.raw_text
+                        if state.detail_raw and raw_text:
+                            d_lines = format_raw(raw_text, detail_w)
                         else:
                             d_lines = format_details(selected, detail_w)
                         for r in range(visible_details):
@@ -594,21 +698,8 @@ def run_tui(configs: list[ConfigSummary],
                                          d_lines[dl_idx], attrs["normal"])
 
             # Footer
-            footer_y = max_y - 2
-            if state.layout == LayoutMode.WIDE:
-                footer = (f"Up/Down: select  PgUp/PgDn: scroll  "
-                          f"d: toggle raw  Enter: apply  q: quit")
-            else:
-                if state.narrow_pane == NarrowPane.MENU:
-                    footer = (f"Up/Down: select  Tab: Details  "
-                              f"d: raw JSON  Enter: apply  q: quit")
-                else:
-                    footer = (f"Up/Down/PgUp/PgDn: scroll  "
-                              f"Tab: Menu  d: toggle raw  "
-                              f"Enter: apply  q: quit")
-            if state.status:
-                footer = f"{state.status}  |  {footer}"
-            _safe_addstr(stdscr, footer_y, 0, footer, attrs["bold"])
+            _safe_addstr(stdscr, max_y - 2, 0,
+                         compose_footer(state), attrs["bold"])
             _safe_addstr(stdscr, max_y - 1, 0,
                          "─" * (max_x - 1), attrs["cyan"])
 
@@ -628,38 +719,61 @@ def run_tui(configs: list[ConfigSummary],
                 curses.KEY_NPAGE: "pagedown",
                 ord("\t"): "tab",
                 ord("d"): "d",
-                ord("D"): "d",
+                ord("D"): "D",
+                ord("n"): "n",
+                ord("e"): "e",
+                ord("i"): "i",
+                ord("r"): "r",
                 ord("q"): "q",
+                27: "esc",
+                127: "backspace",
+                curses.KEY_BACKSPACE: "backspace",
                 ord("\x04"): "ctrld",
                 3: "ctrlc",
                 10: "enter",
                 13: "enter",
-                ord(" "): " ",
             }
             key_str = key_map.get(key)
             if key_str is None:
-                continue
+                # Printable ASCII (prompt capture) and UTF-8 bytes.
+                if 32 <= key < 256:
+                    key_str = chr(key)
+                else:
+                    continue
 
             intent = handle_key(state, key_str)
             if intent == "quit":
                 return TuiResult(TuiOutcome.QUIT)
             if intent == "apply":
-                if state.selected_idx < len(configs):
-                    selected = configs[state.selected_idx]
-                    result = apply_fn(
-                        selected.file.path,
-                        is_valid=selected.is_valid,
-                        error_reason=selected.error)
-                    if result.status == ApplyStatus.BLOCKED:
+                if not current:
+                    state.status = "No profiles"
+                else:
+                    selected = current[state.selected_idx]
+                    result = services.use_fn(selected.record.name)
+                    if result.status in (UseStatus.BLOCKED,
+                                         UseStatus.FAILED):
                         state.status = result.message
-                    elif result.status == ApplyStatus.FAILED:
-                        state.status = result.message
-                    elif result.status == ApplyStatus.NOOP:
+                    elif result.status == UseStatus.NOOP:
                         return TuiResult(TuiOutcome.NOOP,
                                          apply_result=result)
                     else:
                         return TuiResult(TuiOutcome.APPLIED,
                                          apply_result=result)
+            elif intent == "create":
+                state.prompt = "create"
+                state.prompt_label = CREATE_PROMPT_LABEL
+                state.prompt_buffer = ""
+            elif intent == "delete":
+                if not current:
+                    state.status = "No profiles"
+                else:
+                    state.prompt = "delete"
+                    state.prompt_label = delete_prompt_label(
+                        current[state.selected_idx].record.name)
+                    state.prompt_buffer = ""
+            elif intent == "prompt_submit":
+                _submit_prompt(state, box, services)
+            # 'edit' / 'import' / 'replace': registered; Task 16 wires.
             state.clamp()
 
     try:

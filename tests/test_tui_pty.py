@@ -1,7 +1,16 @@
-"""Real PTY integration tests for the curses TUI.
+"""Real PTY integration tests for the v3 curses profile selector.
 
-Proves wide/narrow/too-small layouts, resize, overlay, apply/no-op/
-invalid blocking, and terminal cleanup across exit/signal/exception paths.
+Drives the REAL curses selector through ``tui.run_profile_tui`` via the
+tiny in-test entry ``tests/fixtures/profile_tui_entry.py`` (never the
+CLI — cli wiring is Task 16), under TERM=xterm-256color through
+``tests/pty_harness.py``.  Profile stores are built in a temp HOME
+through the real store/engine, and post-exit outcomes plus the rendered
+``omo.jsonc``/``.active`` state are verified from THIS process.
+
+Replaces the v2 PTY suite (whose 4 env failures shared one root cause:
+HOMEs seeded with only the canonical active file produced an empty v2
+menu, so the child CLI printed 'No configuration files found' and never
+launched curses — see .omo/notepads/v3-omo-profiles/issues.md).
 """
 
 import os
@@ -14,179 +23,208 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from tests.pty_harness import PtyHarness
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+ROOT = Path(__file__).resolve().parent.parent
+ENTRY = Path(__file__).resolve().parent / "fixtures" / "profile_tui_entry.py"
 
 
-def _make_temp_home(*, active_name: str = "oh-my-openagent.json",
-                    active_content: str = '{"model_fallback":true}',
-                    presets: dict | None = None) -> Path:
-    """Create a temporary HOME with .config/opencode/ populated."""
-    home = Path(tempfile.mkdtemp(prefix="test-tui-pty-"))
-    config_dir = home / ".config" / "opencode"
-    config_dir.mkdir(parents=True)
-    (config_dir / active_name).write_text(active_content)
-    if presets:
-        for name, content in presets.items():
-            (config_dir / name).write_text(content)
-    return home
+class ProfileTuiPtyTests(unittest.TestCase):
+    """Each test owns a throwaway HOME and one PTY child."""
 
+    def _spawn(self, home: Path, *, rows: int = 24, cols: int = 80,
+               mode: str = "") -> PtyHarness:
+        args = [sys.executable, str(ENTRY), mode, str(home)]
+        env = {
+            "HOME": str(home),
+            "PYTHONPATH": str(ROOT / "src"),
+            "TERM": "xterm-256color",
+        }
+        return PtyHarness(args, rows=rows, cols=cols, env=env)
 
-def _harness(home: Path, rows: int = 24, cols: int = 80, **kw):
-    """Spawn opencode_config_switcher in a controlled PTY."""
-    args = [
-        sys.executable, "-m", "opencode_config_switcher",
-    ]
-    env = {
-        "HOME": str(home),
-        "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src"),
-        "TERM": kw.pop("term", "xterm-256color"),
-    }
-    return PtyHarness(args, rows=rows, cols=cols, env=env, **kw)
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="test-tui-pty-")
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
 
+    # ── WIDE startup ─────────────────────────────────────────────
 
-class RealTuiPtyTests(unittest.TestCase):
-
-    # ── WIDE mode ──────────────────────────────────────────────────
-
-    def test_wide_startup_shows_content(self):
-        home = _make_temp_home(
-            presets={"oh-my-openagent-b.json": '{"model_fallback":false}'})
-        h = _harness(home, rows=40, cols=120)
+    def test_wide_startup_renders_menu_and_details(self):
+        h = self._spawn(self.home, rows=40, cols=120)
         try:
-            h.wait_for(b"OpenCode", timeout=5)
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.wait_for(b"alpha", timeout=5)
+            h.wait_for(b"beta", timeout=5)
+            h.wait_for(b"gamma", timeout=5)
+            h.wait_for(b"Agents (1):", timeout=5)
             h.send(b"q")
-            h.wait_exit(timeout=5)
-            self.assertEqual(h.exit_status, 0)
+            self.assertEqual(h.wait_exit(timeout=5), 0)
         finally:
             h.close()
 
-    # ── NARROW mode ────────────────────────────────────────────────
+    # ── apply and exit ───────────────────────────────────────────
 
-    def test_narrow_startup_and_tab(self):
-        home = _make_temp_home(
-            presets={"oh-my-openagent-b.json": '{"model_fallback":false}'})
-        h = _harness(home, rows=24, cols=80)
+    def test_enter_applies_second_profile(self):
+        h = self._spawn(self.home, rows=40, cols=120)
         try:
-            h.wait_for(b"OpenCode", timeout=5)
-            h.send(b"\t")  # Tab to Details
-            h.wait_for(b"Details", timeout=3)
-            h.send(b"\t")  # Tab back to Menu
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"\x1bOB")  # Down (application-mode SS3 form) → beta
+            h.send(b"\r")      # Enter → use and exit
+            self.assertEqual(h.wait_exit(timeout=10), 0)
+            self.assertIn(b"TUI-EXIT:APPLIED", h.output)
+            self.assertIn(b"TUI-USE:APPLIED:Profile applied: beta",
+                          h.output)
+            marker = self.home / ".omo" / "profiles" / ".active"
+            self.assertEqual(marker.read_text().strip(), "beta")
+            omo = self.home / ".omo" / "omo.jsonc"
+            self.assertIn("provider/beta", omo.read_text())
         finally:
+            h.close()
+
+    def test_noop_enter_exits_cleanly(self):
+        h = self._spawn(self.home, rows=40, cols=120, mode="noop-seed")
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"\r")  # alpha is active+managed → NOOP exit
+            self.assertEqual(h.wait_exit(timeout=10), 0)
+            self.assertIn(b"TUI-EXIT:NOOP", h.output)
+            self.assertIn(
+                b"TUI-USE:NOOP:No change: profile 'alpha' is already "
+                b"active", h.output)
+        finally:
+            h.close()
+
+    # ── delete with confirm ──────────────────────────────────────
+
+    def test_delete_confirm_removes_profile(self):
+        h = self._spawn(self.home, rows=40, cols=120)
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"D")
+            h.wait_for(b"Delete profile 'alpha'? [y/N]: ", timeout=5)
+            h.send(b"y\r")
+            h.wait_for(b"Deleted profile: alpha", timeout=5)
             h.send(b"q")
-            h.wait_exit(timeout=5)
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+            profiles = self.home / ".omo" / "profiles"
+            self.assertFalse((profiles / "alpha.jsonc").exists())
+            self.assertTrue((profiles / "alpha.jsonc.BAK").exists())
+            self.assertTrue((profiles / "beta.jsonc").exists())
+        finally:
             h.close()
 
-    # ── TOO_SMALL mode ──────────────────────────────────────────────
-
-    def test_too_small_notice(self):
-        home = _make_temp_home()
-        h = _harness(home, rows=10, cols=39)
+    def test_delete_declined_keeps_profile(self):
+        h = self._spawn(self.home, rows=40, cols=120)
         try:
-            h.wait_for(b"too small", timeout=5)
-        finally:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"D")
+            h.wait_for(b"Delete profile 'alpha'? [y/N]: ", timeout=5)
+            h.send(b"n\r")
+            h.wait_for(b"Delete cancelled", timeout=5)
             h.send(b"q")
-            h.wait_exit(timeout=5)
-            h.close()
-
-    # ── apply valid ────────────────────────────────────────────────
-
-    def test_apply_and_exit(self):
-        home = _make_temp_home(
-            active_name="oh-my-openagent.json",
-            active_content="old-content",
-            presets={"oh-my-openagent-b.json": '{"model_fallback":false}'})
-        h = _harness(home, rows=40, cols=120)
-        active = home / ".config" / "opencode" / "oh-my-openagent.json"
-        backup = home / ".config" / "opencode" / "oh-my-openagent.json.BAK"
-        try:
-            h.wait_for(b"OpenCode", timeout=5)
-            h.send(b"\x1b[B")  # Down arrow
-            h.send(b"\r")       # Enter to apply
-            h.wait_exit(timeout=5)
-            # Verify active was replaced
-            self.assertEqual(active.read_text().strip(),
-                             '{"model_fallback":false}')
-            # Verify backup was created
-            self.assertTrue(backup.exists())
-            self.assertEqual(backup.read_text().strip(), "old-content")
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+            self.assertTrue(
+                (self.home / ".omo" / "profiles" / "alpha.jsonc").exists())
         finally:
             h.close()
 
-    # ── invalid blocked ────────────────────────────────────────────
+    # ── create prompt ────────────────────────────────────────────
 
-    def test_invalid_enter_blocked(self):
-        home = _make_temp_home(
-            active_content='{"ok":true}',
-            presets={"oh-my-openagent-bad.json": "{bad"})
-        active = home / ".config" / "opencode" / "oh-my-openagent.json"
-        active_bytes = active.read_bytes()
-        h = _harness(home, rows=40, cols=120)
+    def test_create_prompt_adds_profile(self):
+        h = self._spawn(self.home, rows=40, cols=120)
         try:
-            h.wait_for(b"OpenCode", timeout=5)
-            h.send(b"\x1b[B")  # Down to invalid config
-            h.send(b"\r")       # Enter (should be blocked)
-            import time
-            time.sleep(1)
-            h.send(b"q")        # Quit
-            h.wait_exit(timeout=5)
-            # Active file unchanged
-            self.assertEqual(active.read_bytes(), active_bytes)
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"n")
+            h.wait_for(b"New profile name: ", timeout=5)
+            h.send(b"delta\r")
+            h.wait_for(b"Profile created: delta", timeout=5)
+            h.send(b"q")
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+            delta = self.home / ".omo" / "profiles" / "delta.jsonc"
+            self.assertTrue(delta.exists())
+            self.assertIn("[opencode]", delta.read_text())
         finally:
             h.close()
 
-    # ── quit / Ctrl-C cleanup ──────────────────────────────────────
+    # ── NARROW + resize ──────────────────────────────────────────
+
+    def test_narrow_tab_switches_panes(self):
+        h = self._spawn(self.home, rows=24, cols=80)
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"\t")  # Menu → Details
+            h.wait_for(b"Profile: alpha", timeout=5)
+            h.send(b"\t")  # back to Menu
+            h.wait_for(b"alpha", timeout=5)
+            h.send(b"q")
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+        finally:
+            h.close()
+
+    def test_resize_preserves_selection(self):
+        h = self._spawn(self.home, rows=24, cols=80)
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"\x1bOB")  # Down → beta (selection to preserve)
+            h.resize(rows=40, cols=120)
+            h.wait_for(b" Profiles", timeout=5)  # WIDE redraw happened
+            h.send(b"\r")
+            self.assertEqual(h.wait_exit(timeout=10), 0)
+            self.assertIn(b"TUI-USE:APPLIED:Profile applied: beta",
+                          h.output)
+            marker = self.home / ".omo" / "profiles" / ".active"
+            self.assertEqual(marker.read_text().strip(), "beta")
+        finally:
+            h.close()
+
+    # ── terminal lifecycle (v3 equivalents of the 4 v2 env failures) ──
 
     def test_quit_restores_terminal(self):
-        home = _make_temp_home()
-        h = _harness(home, rows=24, cols=80)
-        h.wait_for(b"OpenCode", timeout=5)
-        h.send(b"q")
-        status = h.wait_exit(timeout=5)
-        self.assertEqual(status, 0)
-        h.close()
+        h = self._spawn(self.home, rows=24, cols=80)
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"q")
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+            # Post-curses stdout proves the alternate screen was left:
+            self.assertIn(b"TUI-EXIT:QUIT", h.output)
+        finally:
+            h.close()
+
+    def test_too_small_notice(self):
+        h = self._spawn(self.home, rows=10, cols=39)
+        try:
+            h.wait_for(b"too small", timeout=10)
+            h.send(b"q")
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+        finally:
+            h.close()
 
     def test_ctrl_c_cleanup(self):
-        home = _make_temp_home()
-        h = _harness(home, rows=24, cols=80)
-        h.wait_for(b"OpenCode", timeout=5)
-        os.kill(h._child_pid, signal.SIGINT)
-        h.wait_exit(timeout=5)
-        h.close()
+        h = self._spawn(self.home, rows=24, cols=80)
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            os.kill(h._child_pid, signal.SIGINT)
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+            self.assertIn(b"TUI-EXIT:QUIT", h.output)
+        finally:
+            h.close()
 
-    # ── injected exception ─────────────────────────────────────────
+    def test_ascii_border_entry(self):
+        h = self._spawn(self.home, rows=24, cols=80, mode="ascii-border")
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"q")
+            self.assertEqual(h.wait_exit(timeout=5), 0)
+        finally:
+            h.close()
 
-    def test_injected_exception_cleanup(self):
-        home = _make_temp_home()
-        args = [sys.executable,
-                str(FIXTURES / "failing_tui_entry.py")]
-        env = {
-            "HOME": str(home),
-            "PYTHONPATH": str(FIXTURES.parent.parent / "src"),
-            "TERM": "xterm-256color",
-        }
-        h = PtyHarness(args, rows=24, cols=80, env=env)
-        status = h.wait_exit(timeout=10)
-        self.assertEqual(status, 1)
-        h.close()
-
-    # ── ASCII border probe ─────────────────────────────────────────
-
-    def test_ascii_border_in_pty(self):
-        home = _make_temp_home()
-        args = [sys.executable,
-                str(FIXTURES / "ascii_tui_entry.py")]
-        env = {
-            "HOME": str(home),
-            "PYTHONPATH": str(FIXTURES.parent.parent / "src"),
-            "TERM": "xterm-256color",
-        }
-        h = PtyHarness(args, rows=24, cols=80, env=env)
-        h.wait_for(b"OpenCode", timeout=5)
-        h.send(b"q")
-        h.wait_exit(timeout=5)
-        # ASCII probe replaces border rendering — verify it ran without error
-        self.assertEqual(h.exit_status, 0)
-        h.close()
+    def test_injected_failure_restores_terminal(self):
+        h = self._spawn(self.home, rows=24, cols=80, mode="fail-apply")
+        try:
+            h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
+            h.send(b"\r")  # use_fn raises → FATAL, terminal restored
+            self.assertEqual(h.wait_exit(timeout=5), 1)
+            self.assertIn(b"TUI-EXIT:FATAL", h.output)
+        finally:
+            h.close()
 
 
 if __name__ == "__main__":
