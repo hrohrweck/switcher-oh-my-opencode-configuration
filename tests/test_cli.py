@@ -6,7 +6,9 @@ the sandbox.  Only cli.py may print user output or choose exit codes.
 """
 
 import contextlib
+import hashlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -21,6 +23,7 @@ from opencode_config_switcher.jsonc import dumps as jsonc_dumps
 from opencode_config_switcher.jsonc import loads as jsonc_loads
 from opencode_config_switcher.omoconfig import OmoDocument
 from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.transform import transform_legacy
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 PY = sys.executable
@@ -416,6 +419,786 @@ class StreamOwnershipTests(unittest.TestCase):
         source = (SRC / "opencode_config_switcher" / "cli.py").read_text(
             encoding="utf-8")
         self.assertNotIn("import curses", source.split("def ")[0])
+
+
+# ── Task 9: use/create/delete/import ───────────────────────────────
+
+def _legacy_json(model: str) -> str:
+    """One minimal valid legacy configuration document."""
+    return json.dumps({"model_fallback": False,
+                       "agents": {"build": {"model": model}}})
+
+
+INVALID_LEGACY = '{"agents": {"build": {"model": "p/m"}},}'
+
+
+@contextlib.contextmanager
+def _home_with_legacy(files, *, profiles=None, active=None, omo_text=None):
+    """Temp HOME adding a legacy tree under ~/.config/opencode."""
+    with _home_with(profiles, active=active, omo_text=omo_text) as home:
+        legacy = home / ".config" / "opencode"
+        legacy.mkdir(parents=True)
+        for name, text in files.items():
+            (legacy / name).write_text(text, encoding="utf-8")
+        yield home
+
+
+def _tree_checksum(root: Path) -> str:
+    """Stable digest over a directory tree (names + file bytes)."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        digest.update(path.relative_to(root).as_posix().encode())
+        if path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _profile_names(home) -> list[str]:
+    return sorted(
+        path.name for path in (home / ".omo" / "profiles").iterdir()
+        if not path.name.startswith("."))
+
+
+class UseTests(unittest.TestCase):
+    def test_applied_exact_messages_and_backup(self):
+        with _home_with({"alpha": ALPHA_TEXT, "beta": BETA_TEXT},
+                        omo_text=LIVE_TEXT) as home:
+            proc = _run_cli(["use", "alpha"], home=home)
+            backup_line = f"Backup saved to: {home / '.omo' / 'omo.jsonc.BAK'}\n"
+            omo = (home / ".omo" / "omo.jsonc").read_text(encoding="utf-8")
+            active = (home / ".omo" / "profiles" / ".active").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout,
+                         "Profile applied: alpha\n" + backup_line)
+        self.assertEqual(active, "alpha\n")
+        self.assertEqual(
+            omo,
+            jsonc_dumps(render_document(
+                OmoDocument(raw=jsonc_loads(ALPHA_TEXT)),
+                OmoDocument(raw=jsonc_loads(LIVE_TEXT)))))
+
+    def test_noop(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            use_profile(Paths.build(home), "alpha")
+            proc = _run_cli(["use", "alpha"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout, "No change: profile 'alpha' is already active\n")
+
+    def test_blocked_missing_exits_2(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["use", "nope"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile 'nope' not found\n")
+        self.assertEqual(proc.stdout, "")
+
+    def test_blocked_invalid_exits_2(self):
+        with _home_with({"broken": BROKEN_TEXT}) as home:
+            proc = _run_cli(["use", "broken"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertTrue(proc.stderr.startswith(
+            "Cannot apply invalid profile: broken:"), proc.stderr)
+
+    def test_blocked_invalid_name_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["use", "a/b"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Invalid profile name: 'a/b'\n")
+
+    def test_without_name_reuses_plain_selector(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["use"], home=home, stdin="1\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Available profiles:\n"
+            "  1) alpha\n"
+            "Select 1-1 or q: "
+            "Profile applied: alpha\n"
+            f"Backup saved to: {home / '.omo' / 'omo.jsonc.BAK'}\n")
+
+    def test_without_name_tty_routes_to_selector_stub(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            fake_out = _FakeTty()
+            with mock.patch("sys.stdin", _FakeTty("")), \
+                    mock.patch("sys.stdout", fake_out), \
+                    mock.patch.object(
+                        cli, "run_tui_selector",
+                        return_value=cli.TuiHandleOutcome.QUIT), \
+                    mock.patch.dict(os.environ,
+                                    {"TERM": "xterm-256color",
+                                     "HOME": str(home)}):
+                code = cli.main(["use"])
+        self.assertEqual(code, 0)
+        self.assertIn("Exiting without changes", fake_out.getvalue())
+
+    def test_select_alias_matches_use(self):
+        with _home_with({"alpha": ALPHA_TEXT}, omo_text=LIVE_TEXT) as home:
+            proc = _run_cli(["select", "alpha"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Profile applied: alpha\n"
+            f"Backup saved to: {home / '.omo' / 'omo.jsonc.BAK'}\n")
+
+
+class CreateTests(unittest.TestCase):
+    def test_minimal_document(self):
+        with _home_with() as home:
+            proc = _run_cli(["create", "fresh"], home=home)
+            stored = (home / ".omo" / "profiles" / "fresh.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "Profile created: fresh\n")
+        self.assertEqual(
+            stored,
+            jsonc_dumps({"$schema": SCHEMA, "[opencode]": {}}))
+
+    def test_already_exists_exits_2(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["create", "alpha"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile already exists: alpha\n")
+
+    def test_invalid_name_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["create", "a/b"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Invalid profile name: 'a/b'\n")
+
+    def test_from_copies_document(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["create", "copy", "--from", "alpha"], home=home)
+            copied = (home / ".omo" / "profiles" / "copy.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "Profile created: copy\n")
+        self.assertEqual(copied, jsonc_dumps(jsonc_loads(ALPHA_TEXT)))
+
+    def test_from_missing_source_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["create", "copy", "--from", "nope"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile 'nope' not found\n")
+
+    def test_from_invalid_source_exits_2(self):
+        with _home_with({"broken": BROKEN_TEXT}) as home:
+            proc = _run_cli(["create", "copy", "--from", "broken"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertTrue(proc.stderr.startswith(
+            "Cannot copy invalid profile: broken:"), proc.stderr)
+
+    def test_from_invalid_source_name_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["create", "copy", "--from", "a/b"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Invalid profile name: 'a/b'\n")
+
+
+class DeleteTests(unittest.TestCase):
+    def test_missing_exits_2(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["delete", "nope", "--yes"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile 'nope' not found\n")
+
+    def test_missing_check_precedes_non_tty_gate(self):
+        with _home_with() as home:
+            proc = _run_cli(["delete", "nope"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile 'nope' not found\n")
+
+    def test_invalid_name_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["delete", "a/b", "--yes"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Invalid profile name: 'a/b'\n")
+
+    def test_yes_deletes_and_reports_backup(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["delete", "alpha", "--yes"], home=home)
+            bak = home / ".omo" / "profiles" / "alpha.jsonc.BAK"
+            bak_exists = bak.is_file()
+            remaining = _profile_names(home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout, f"Deleted profile: alpha (backup: {bak})\n")
+        self.assertTrue(bak_exists)
+        self.assertEqual(remaining, ["alpha.jsonc.BAK"])
+
+    def test_yes_on_active_also_clears_marker(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            use_profile(Paths.build(home), "alpha")
+            proc = _run_cli(["delete", "alpha", "--yes"], home=home)
+            marker = home / ".omo" / "profiles" / ".active"
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            f"Deleted profile: alpha (backup: "
+            f"{home / '.omo' / 'profiles' / 'alpha.jsonc.BAK'})\n"
+            "No profile is active now.\n")
+        self.assertFalse(marker.exists())
+
+    def test_non_tty_without_yes_refuses(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["delete", "alpha"], home=home)
+            survived = (home / ".omo" / "profiles" / "alpha.jsonc").is_file()
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stderr,
+            "Refusing to delete without --yes in non-interactive mode\n")
+        self.assertEqual(proc.stdout, "")
+        self.assertTrue(survived)
+
+    def _run_prompted(self, home, answer, *, eof=False):
+        prompts, out = [], io.StringIO()
+
+        def fake_input(prompt=""):
+            prompts.append(prompt)
+            if eof:
+                raise EOFError
+            return answer
+
+        with mock.patch("sys.stdin", _FakeTty()), \
+                mock.patch("sys.stdout", out), \
+                mock.patch("builtins.input", side_effect=fake_input), \
+                mock.patch.dict(os.environ, {"HOME": str(home)}):
+            code = cli.main(["delete", "alpha"])
+        return code, prompts, out.getvalue()
+
+    def test_prompt_confirm_deletes(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            code, prompts, out = self._run_prompted(home, "y")
+            bak = home / ".omo" / "profiles" / "alpha.jsonc.BAK"
+            bak_exists = bak.is_file()
+            profile_gone = not bak.parent.joinpath("alpha.jsonc").exists()
+        self.assertEqual(code, 0)
+        self.assertEqual(prompts, ["Delete profile 'alpha'? [y/N]: "])
+        self.assertEqual(
+            out, f"Deleted profile: alpha (backup: {bak})\n")
+        self.assertTrue(bak_exists)
+        self.assertTrue(profile_gone)
+
+    def test_prompt_uppercase_y_confirms(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            code, prompts, _ = self._run_prompted(home, "Y")
+            bak_exists = (home / ".omo" / "profiles"
+                          / "alpha.jsonc.BAK").is_file()
+        self.assertEqual(code, 0)
+        self.assertEqual(prompts, ["Delete profile 'alpha'? [y/N]: "])
+        self.assertTrue(bak_exists)
+
+    def test_prompt_decline_keeps_profile(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            code, prompts, out = self._run_prompted(home, "n")
+            survived = (home / ".omo" / "profiles" / "alpha.jsonc").is_file()
+        self.assertEqual(code, 0)
+        self.assertEqual(prompts, ["Delete profile 'alpha'? [y/N]: "])
+        self.assertEqual(out, "Exiting without changes\n")
+        self.assertTrue(survived)
+
+    def test_prompt_eof_exits_cleanly(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            code, prompts, out = self._run_prompted(home, "", eof=True)
+            survived = (home / ".omo" / "profiles" / "alpha.jsonc").is_file()
+        self.assertEqual(code, 0)
+        self.assertEqual(prompts, ["Delete profile 'alpha'? [y/N]: "])
+        self.assertEqual(out, "Exiting without changes\n")
+        self.assertTrue(survived)
+
+
+class ImportCurrentTests(unittest.TestCase):
+    def test_captures_without_touching_live(self):
+        with _home_with(omo_text=LIVE_TEXT) as home:
+            live_before = (home / ".omo" / "omo.jsonc").read_bytes()
+            proc = _run_cli(["import", "--current"], home=home)
+            stored = (home / ".omo" / "profiles" / "current.jsonc").read_text(
+                encoding="utf-8")
+            live_after = (home / ".omo" / "omo.jsonc").read_bytes()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            f"Imported profile: current "
+            f"(from {home / '.omo' / 'omo.jsonc'})\n")
+        self.assertEqual(live_after, live_before)
+        self.assertEqual(stored, jsonc_dumps(jsonc_loads(LIVE_TEXT)))
+
+    def test_custom_name(self):
+        with _home_with(omo_text=LIVE_TEXT) as home:
+            proc = _run_cli(["import", "--current", "mine"], home=home)
+            stored_exists = (home / ".omo" / "profiles"
+                             / "mine.jsonc").is_file()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            f"Imported profile: mine (from {home / '.omo' / 'omo.jsonc'})\n")
+        self.assertTrue(stored_exists)
+
+    def test_missing_live_file_exits_1(self):
+        with _home_with() as home:
+            proc = _run_cli(["import", "--current"], home=home)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(
+            proc.stderr,
+            f"No configuration found at {home / '.omo' / 'omo.jsonc'}\n")
+        self.assertEqual(proc.stdout, "")
+
+    def test_collision_exits_2(self):
+        with _home_with({"current": ALPHA_TEXT}, omo_text=LIVE_TEXT) as home:
+            proc = _run_cli(["import", "--current"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile already exists: current\n")
+
+    def test_force_overwrites(self):
+        with _home_with({"current": ALPHA_TEXT}, omo_text=LIVE_TEXT) as home:
+            proc = _run_cli(["import", "--current", "--force"], home=home)
+            stored = (home / ".omo" / "profiles" / "current.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(stored, jsonc_dumps(jsonc_loads(LIVE_TEXT)))
+
+    def test_invalid_live_file_exits_2(self):
+        with _home_with(omo_text=BROKEN_TEXT) as home:
+            proc = _run_cli(["import", "--current"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertTrue(proc.stderr.startswith(
+            "Cannot import invalid configuration:"), proc.stderr)
+
+    def test_invalid_name_exits_2(self):
+        with _home_with(omo_text=LIVE_TEXT) as home:
+            proc = _run_cli(["import", "--current", "a/b"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Invalid profile name: 'a/b'\n")
+
+    def test_current_composes_with_all_legacy(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/m")}
+        with _home_with_legacy(files, omo_text=LIVE_TEXT) as home:
+            proc = _run_cli(
+                ["import", "--current", "live", "--all-legacy"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            f"Imported profile: live "
+            f"(from {home / '.omo' / 'omo.jsonc'})\n"
+            "Imported profile: a (from oh-my-openagent-a.json)\n")
+
+
+class ImportGateTests(unittest.TestCase):
+    def test_no_flags_non_interactive_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["import"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stderr,
+            "Specify --all-legacy, --source PATH, or --current "
+            "to import configurations.\n")
+        self.assertEqual(proc.stdout, "")
+
+    def test_no_flags_tty_still_gated(self):
+        with _home_with() as home:
+            err = io.StringIO()
+            with mock.patch("sys.stdin", _FakeTty()), \
+                    mock.patch("sys.stderr", err), \
+                    mock.patch.dict(os.environ, {"HOME": str(home)}):
+                code = cli.main(["import"])
+        self.assertEqual(code, 2)
+        self.assertIn("Specify --all-legacy", err.getvalue())
+
+    def test_name_with_two_sources_exits_2(self):
+        files = {"a.json": _legacy_json("p/m"), "b.json": _legacy_json("q/n")}
+        with _home_with_legacy(files) as home:
+            legacy = home / ".config" / "opencode"
+            proc = _run_cli(
+                ["import", "--name", "x",
+                 "--source", str(legacy / "a.json"),
+                 "--source", str(legacy / "b.json")], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "--name requires exactly one source\n")
+
+    def test_name_with_zero_sources_beats_empty_dir(self):
+        with _home_with() as home:
+            proc = _run_cli(["import", "--all-legacy", "--name", "x"],
+                            home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "--name requires exactly one source\n")
+
+    def test_source_file_missing_exits_2(self):
+        with _home_with() as home:
+            missing = home / "nope.json"
+            proc = _run_cli(["import", "--source", str(missing)], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, f"Source file not found: {missing}\n")
+
+    def test_empty_legacy_dir_exits_1(self):
+        with _home_with_legacy({}) as home:
+            proc = _run_cli(["import", "--all-legacy"], home=home)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(
+            proc.stderr,
+            f"No legacy configuration files found in "
+            f"{home / '.config' / 'opencode'}\n")
+
+    def test_source_takes_precedence_over_all_legacy(self):
+        files = {"oh-my-openagent-g.json": _legacy_json("p/m"),
+                 "oh-my-openagent-h.json": _legacy_json("q/n")}
+        with _home_with_legacy(files) as home:
+            chosen = home / ".config" / "opencode" / "oh-my-openagent-h.json"
+            proc = _run_cli(["import", "--all-legacy", "--source", str(chosen)],
+                            home=home)
+            names = _profile_names(home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Imported profile: h (from oh-my-openagent-h.json)\n")
+        self.assertEqual(names, ["h.jsonc"])
+
+
+class ImportBatchTests(unittest.TestCase):
+    def test_single_source(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/m")}
+        with _home_with_legacy(files) as home:
+            src = home / ".config" / "opencode" / "oh-my-openagent-a.json"
+            proc = _run_cli(["import", "--source", str(src)], home=home)
+            stored = (home / ".omo" / "profiles" / "a.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Imported profile: a (from oh-my-openagent-a.json)\n")
+        self.assertEqual(
+            stored,
+            jsonc_dumps(transform_legacy(json.loads(_legacy_json("p/m")))[0]))
+
+    def test_multiple_sources_import_in_cli_order(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/m"),
+                 "oh-my-openagent-b.json": _legacy_json("q/n")}
+        with _home_with_legacy(files) as home:
+            legacy = home / ".config" / "opencode"
+            proc = _run_cli(
+                ["import", "--source", str(legacy / "oh-my-openagent-b.json"),
+                 "--source", str(legacy / "oh-my-openagent-a.json")],
+                home=home)
+            names = _profile_names(home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Imported profile: b (from oh-my-openagent-b.json)\n"
+            "Imported profile: a (from oh-my-openagent-a.json)\n")
+        self.assertEqual(names, ["a.jsonc", "b.jsonc"])
+
+    def test_invalid_mid_batch_aborts_at_invalid_file(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/m"),
+                 "oh-my-openagent-b.json": INVALID_LEGACY,
+                 "oh-my-openagent-c.json": _legacy_json("r/o")}
+        with _home_with_legacy(files) as home:
+            legacy = home / ".config" / "opencode"
+            before = _tree_checksum(legacy)
+            proc = _run_cli(["import", "--all-legacy"], home=home)
+            names = _profile_names(home)
+            after = _tree_checksum(legacy)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stdout,
+            "Imported profile: a (from oh-my-openagent-a.json)\n")
+        self.assertTrue(proc.stderr.startswith(
+            "Cannot import invalid configuration: "
+            "oh-my-openagent-b.json: Invalid JSON in"), proc.stderr)
+        self.assertEqual(names, ["a.jsonc"])
+        self.assertEqual(after, before)
+
+    def test_collision_aborts_batch_without_writes(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/m"),
+                 "oh-my-openagent-b.json": _legacy_json("q/n")}
+        with _home_with_legacy(files, profiles={"a": ALPHA_TEXT}) as home:
+            proc = _run_cli(["import", "--all-legacy"], home=home)
+            names = _profile_names(home)
+            alpha = (home / ".omo" / "profiles" / "a.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile already exists: a\n")
+        self.assertEqual(names, ["a.jsonc"])
+        self.assertEqual(alpha, ALPHA_TEXT)
+
+    def test_force_overwrites_with_backup(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/m")}
+        with _home_with_legacy(files, profiles={"a": ALPHA_TEXT}) as home:
+            proc = _run_cli(["import", "--all-legacy", "--force"], home=home)
+            stored = (home / ".omo" / "profiles" / "a.jsonc").read_text(
+                encoding="utf-8")
+            bak = (home / ".omo" / "profiles" / "a.jsonc.BAK").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            stored,
+            jsonc_dumps(transform_legacy(json.loads(_legacy_json("p/m")))[0]))
+        self.assertEqual(bak, ALPHA_TEXT)
+
+    def test_warnings_print_after_success_line(self):
+        legacy_doc = json.dumps({
+            "agents": {"build": {"model": "p/m", "reasoning": "high",
+                                  "reasoningEffort": "low"}}})
+        files = {"oh-my-openagent-w.json": legacy_doc}
+        with _home_with_legacy(files) as home:
+            proc = _run_cli(["import", "--all-legacy"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Imported profile: w (from oh-my-openagent-w.json)\n")
+        self.assertEqual(
+            proc.stderr,
+            "warning: conflict: agents.build dropped "
+            "reasoningEffort='low' kept reasoning='high'\n")
+
+    def test_name_with_single_source(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/m")}
+        with _home_with_legacy(files) as home:
+            src = home / ".config" / "opencode" / "oh-my-openagent-a.json"
+            proc = _run_cli(["import", "--source", str(src),
+                             "--name", "custom"], home=home)
+            names = _profile_names(home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Imported profile: custom (from oh-my-openagent-a.json)\n")
+        self.assertEqual(names, ["custom.jsonc"])
+
+
+class ImportChooserTests(unittest.TestCase):
+    THREE_FILES = {
+        f"oh-my-openagent-{n}.json": _legacy_json(f"p/{n}")
+        for n in ("a", "b", "c")
+    }
+
+    def _sources_argv(self, home):
+        legacy = home / ".config" / "opencode"
+        argv = ["import"]
+        for name in self.THREE_FILES:
+            argv += ["--source", str(legacy / name)]
+        return argv
+
+    def _run_chooser(self, home, answer, argv, *, eof=False):
+        out, err, prompts = io.StringIO(), io.StringIO(), []
+
+        def fake_input(prompt=""):
+            prompts.append(prompt)
+            out.write(prompt)
+            if eof:
+                raise EOFError
+            return answer
+
+        with mock.patch("sys.stdin", _FakeTty()), \
+                mock.patch("sys.stdout", out), \
+                mock.patch("sys.stderr", err), \
+                mock.patch("builtins.input", side_effect=fake_input), \
+                mock.patch.dict(os.environ, {"HOME": str(home)}):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue(), prompts
+
+    MENU = ("Importable configurations:\n"
+            "  1) oh-my-openagent-a.json\n"
+            "  2) oh-my-openagent-b.json\n"
+            "  3) oh-my-openagent-c.json\n"
+            "Import 1-3, a for all, or q: ")
+
+    def test_number_imports_exactly_one(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, out, err, prompts = self._run_chooser(
+                home, "2", self._sources_argv(home))
+            names = _profile_names(home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, self.MENU
+                         + "Imported profile: b "
+                         "(from oh-my-openagent-b.json)\n")
+        self.assertEqual(prompts, ["Import 1-3, a for all, or q: "])
+        self.assertEqual(names, ["b.jsonc"])
+
+    def test_a_imports_all(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, out, err, _ = self._run_chooser(
+                home, "a", self._sources_argv(home))
+            names = _profile_names(home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            out, self.MENU
+            + "Imported profile: a (from oh-my-openagent-a.json)\n"
+            + "Imported profile: b (from oh-my-openagent-b.json)\n"
+            + "Imported profile: c (from oh-my-openagent-c.json)\n")
+        self.assertEqual(names, ["a.jsonc", "b.jsonc", "c.jsonc"])
+
+    def test_uppercase_a_imports_all(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, _, _, _ = self._run_chooser(
+                home, "A", self._sources_argv(home))
+            names = _profile_names(home)
+        self.assertEqual(code, 0)
+        self.assertEqual(names, ["a.jsonc", "b.jsonc", "c.jsonc"])
+
+    def test_quit_imports_nothing(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, out, err, _ = self._run_chooser(
+                home, "q", self._sources_argv(home))
+            names = _profile_names(home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, self.MENU + "Exiting without changes\n")
+        self.assertEqual(names, [])
+
+    def test_uppercase_q_quits(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, out, _, _ = self._run_chooser(
+                home, "Q", self._sources_argv(home))
+            names = _profile_names(home)
+        self.assertEqual(code, 0)
+        self.assertTrue(out.endswith("Exiting without changes\n"))
+        self.assertEqual(names, [])
+
+    def test_eof_quits(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, out, err, _ = self._run_chooser(
+                home, "", self._sources_argv(home), eof=True)
+            names = _profile_names(home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, self.MENU + "Exiting without changes\n")
+        self.assertEqual(names, [])
+
+    def test_invalid_selection_exits_2(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, out, err, _ = self._run_chooser(
+                home, "zz", self._sources_argv(home))
+            names = _profile_names(home)
+        self.assertEqual(code, 2)
+        self.assertEqual(
+            err, "Invalid selection: 'zz'; expected 1-3, a, or q\n")
+        self.assertEqual(names, [])
+
+    def test_invalid_file_marked_and_blocked_when_picked(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/a"),
+                 "oh-my-openagent-b.json": INVALID_LEGACY,
+                 "oh-my-openagent-c.json": _legacy_json("p/c")}
+        with _home_with_legacy(files) as home:
+            legacy = home / ".config" / "opencode"
+            argv = ["import"]
+            for name in files:
+                argv += ["--source", str(legacy / name)]
+            code, out, err, _ = self._run_chooser(home, "2", argv)
+            names = _profile_names(home)
+        self.assertEqual(code, 2)
+        self.assertEqual(
+            out,
+            "Importable configurations:\n"
+            "  1) oh-my-openagent-a.json\n"
+            "  2) oh-my-openagent-b.json [invalid]\n"
+            "  3) oh-my-openagent-c.json\n"
+            "Import 1-3, a for all, or q: ")
+        self.assertTrue(err.startswith(
+            "Cannot import invalid configuration: "
+            "oh-my-openagent-b.json: Invalid JSON in"), err)
+        self.assertEqual(names, [])
+
+    def test_all_legacy_skips_chooser_on_tty(self):
+        with _home_with_legacy(self.THREE_FILES) as home:
+            code, out, err, prompts = self._run_chooser(
+                home, "should-not-be-asked", ["import", "--all-legacy"])
+            names = _profile_names(home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(prompts, [])
+        self.assertEqual(
+            out,
+            "Imported profile: a (from oh-my-openagent-a.json)\n"
+            + "Imported profile: b (from oh-my-openagent-b.json)\n"
+            + "Imported profile: c (from oh-my-openagent-c.json)\n")
+        self.assertEqual(names, ["a.jsonc", "b.jsonc", "c.jsonc"])
+
+    def test_source_with_tty_still_shows_chooser(self):
+        files = {"oh-my-openagent-a.json": _legacy_json("p/a")}
+        with _home_with_legacy(files) as home:
+            src = home / ".config" / "opencode" / "oh-my-openagent-a.json"
+            code, out, err, _ = self._run_chooser(
+                home, "1", ["import", "--source", str(src)])
+            names = _profile_names(home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            out,
+            "Importable configurations:\n"
+            "  1) oh-my-openagent-a.json\n"
+            "Import 1-1, a for all, or q: "
+            "Imported profile: a (from oh-my-openagent-a.json)\n")
+        self.assertEqual(names, ["a.jsonc"])
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_full_legacy_to_use_lifecycle(self):
+        names = ["balanced", "cost-efficient", "deepseek", "local",
+                 "local-with-cloud-brain", "max", "smart", "smart-glm"]
+        files = {f"oh-my-openagent-{n}.json": _legacy_json(f"prov/{n}")
+                 for n in names}
+        files["oh-my-opencode-x.json"] = _legacy_json("prov/x")
+        # File order ('-' sorts before '.'): openagent-local-with-cloud-brain
+        # precedes openagent-local (and smart-glm precedes smart);
+        # profile-name order swaps those pairs back.
+        file_order = ["balanced", "cost-efficient", "deepseek",
+                      "local-with-cloud-brain", "local", "max", "smart-glm",
+                      "smart"]
+        with _home_with_legacy(files) as home:
+            legacy = home / ".config" / "opencode"
+            before = _tree_checksum(legacy)
+            paths = Paths.build(home)
+
+            proc_import = _run_cli(["import", "--all-legacy"], home=home)
+            after_import = _tree_checksum(legacy)
+            proc_list = _run_cli(["list"], home=home)
+            proc_use = _run_cli(["use", "cost-efficient"], home=home)
+            proc_raw = _run_cli(["show", "cost-efficient", "--raw"], home=home)
+            live = paths.omo_path.read_text(encoding="utf-8")
+            proc_del = _run_cli(["delete", "cost-efficient", "--yes"],
+                                home=home)
+            bak = paths.profiles_dir / "cost-efficient.jsonc.BAK"
+            bak_exists = bak.is_file()
+            marker_exists = paths.active_marker.exists()
+            src = legacy / "oh-my-openagent-cost-efficient.json"
+            proc_reimport = _run_cli(
+                ["import", "--source", str(src), "--force"], home=home)
+            after_all = _tree_checksum(legacy)
+
+        expected_import = "".join(
+            f"Imported profile: {n} (from oh-my-openagent-{n}.json)\n"
+            for n in file_order) + \
+            "Imported profile: x (from oh-my-opencode-x.json)\n"
+        self.assertEqual(proc_import.returncode, 0, proc_import.stderr)
+        self.assertEqual(proc_import.stdout, expected_import)
+        self.assertEqual(after_import, before)
+        self.assertEqual(after_all, before)
+
+        self.assertEqual(proc_list.returncode, 0, proc_list.stderr)
+        self.assertEqual(
+            proc_list.stdout,
+            "".join(f"  {n}\n" for n in names) + "  x\n")
+
+        self.assertEqual(proc_use.returncode, 0, proc_use.stderr)
+        self.assertEqual(
+            proc_use.stdout,
+            "Profile applied: cost-efficient\n"
+            f"Backup saved to: {paths.omo_backup}\n")
+
+        expected_profile = jsonc_dumps(
+            transform_legacy(json.loads(_legacy_json("prov/cost-efficient")))[0])
+        self.assertEqual(proc_raw.returncode, 0, proc_raw.stderr)
+        self.assertEqual(proc_raw.stdout, expected_profile)
+        self.assertEqual(live, expected_profile)
+
+        self.assertEqual(proc_del.returncode, 0, proc_del.stderr)
+        self.assertEqual(
+            proc_del.stdout,
+            f"Deleted profile: cost-efficient (backup: {bak})\n"
+            "No profile is active now.\n")
+        self.assertTrue(bak_exists)
+        self.assertFalse(marker_exists)
+
+        self.assertEqual(proc_reimport.returncode, 0, proc_reimport.stderr)
+        self.assertEqual(
+            proc_reimport.stdout,
+            "Imported profile: cost-efficient "
+            "(from oh-my-openagent-cost-efficient.json)\n")
 
 
 if __name__ == "__main__":
