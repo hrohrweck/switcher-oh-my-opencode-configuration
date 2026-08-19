@@ -1,0 +1,254 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json",
+  "[opencode]": {
+    "model_fallback": true,
+    "runtime_fallback": {
+      "enabled": true,
+      "retry_on_errors": [
+        429,
+        503,
+        529
+      ],
+      "max_fallback_attempts": 3,
+      "cooldown_seconds": 60
+    },
+    "agents": {
+      "sisyphus": {
+        "model": "provider-1/model-1",
+        "reasoning": "max",
+        "fallback_models": [
+          "provider-2/model-2",
+          "provider-3/model-3"
+        ]
+      },
+      "hephaestus": {
+        "model": "provider-1/model-1",
+        "reasoning": "max",
+        "fallback_models": [
+          "provider-4/model-4",
+          "provider-2/model-2"
+        ]
+      },
+      "oracle": {
+        "model": "provider-1/model-1",
+        "reasoning": "max",
+        "fallback_models": [
+          "provider-4/model-4"
+        ]
+      },
+      "librarian": {
+        "model": "provider-2/model-2",
+        "fallback_models": [
+          "provider-5/model-5",
+          "provider-6/model-6",
+          "provider-7/model-7"
+        ]
+      },
+      "explore": {
+        "model": "provider-2/model-2",
+        "fallback_models": [
+          "provider-8/model-8",
+          "provider-7/model-7"
+        ]
+      },
+      "multimodal-looker": {
+        "model": "provider-9/model-9",
+        "fallback_models": [
+          "provider-10/model-10",
+          "provider-11/model-11"
+        ]
+      },
+      "prometheus": {
+        "model": "provider-1/model-1",
+        "reasoning": "max",
+        "fallback_models": [
+          "provider-4/model-4"
+        ]
+      },
+      "metis": {
+        "model": "provider-1/model-1",
+        "reasoning": "max",
+        "fallback_models": [
+          {
+            "model": "provider-12/model-12",
+            "reasoning": "xhigh"
+          },
+          {
+            "model": "provider-13/model-13",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-14/model-14",
+            "reasoning": "max"
+          }
+        ]
+      },
+      "momus": {
+        "model": "provider-12/model-12",
+        "reasoning": "xhigh",
+        "fallback_models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-13/model-13",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-14/model-14",
+            "reasoning": "max"
+          }
+        ]
+      },
+      "atlas": {
+        "model": "provider-1/model-1",
+        "reasoning": "max",
+        "fallback_models": [
+          {
+            "model": "provider-15/model-15",
+            "reasoning": "medium"
+          }
+        ]
+      },
+      "sisyphus-junior": {
+        "model": "provider-2/model-2",
+        "fallback_models": [
+          "provider-3/model-3"
+        ]
+      }
+    },
+    "categories": {
+      "visual-engineering": {
+        "models": [
+          "provider-4/model-4",
+          {
+            "model": "provider-1/model-1"
+          },
+          {
+            "model": "provider-16/model-16",
+            "reasoning": "high"
+          },
+          {
+            "model": "provider-17/model-17",
+            "reasoning": "high"
+          }
+        ]
+      },
+      "ultrabrain": {
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-18/model-18",
+            "reasoning": "high"
+          },
+          {
+            "model": "provider-1/model-1"
+          }
+        ]
+      },
+      "deep": {
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-18/model-18",
+            "reasoning": "high"
+          },
+          {
+            "model": "provider-17/model-17",
+            "reasoning": "high"
+          }
+        ]
+      },
+      "artistry": {
+        "models": [
+          {
+            "model": "provider-18/model-18",
+            "reasoning": "high"
+          },
+          {
+            "model": "provider-16/model-16",
+            "reasoning": "high"
+          },
+          {
+            "model": "provider-17/model-17",
+            "reasoning": "high"
+          },
+          {
+            "model": "provider-15/model-15"
+          }
+        ]
+      },
+      "quick": {
+        "models": [
+          "provider-2/model-2",
+          {
+            "model": "provider-19/model-19"
+          },
+          {
+            "model": "provider-4/model-4"
+          },
+          {
+            "model": "provider-6/model-6"
+          }
+        ]
+      },
+      "unspecified-low": {
+        "models": [
+          "provider-2/model-2",
+          {
+            "model": "provider-20/model-20"
+          },
+          {
+            "model": "provider-21/model-21"
+          }
+        ]
+      },
+      "unspecified-high": {
+        "models": [
+          {
+            "model": "provider-2/model-2",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-13/model-13",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-14/model-14",
+            "reasoning": "max"
+          }
+        ]
+      },
+      "writing": {
+        "models": [
+          "provider-2/model-2",
+          {
+            "model": "provider-1/model-1"
+          },
+          {
+            "model": "provider-4/model-4"
+          },
+          {
+            "model": "provider-13/model-13",
+            "reasoning": "max"
+          },
+          {
+            "model": "provider-14/model-14",
+            "reasoning": "max"
+          }
+        ]
+      }
+    }
+  }
+}
