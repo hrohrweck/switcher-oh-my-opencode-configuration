@@ -27,6 +27,24 @@ Shell contract:
     ``confirm-yes`` carries the pending action string as its payload;
     payload "quit" → shell returns CANCELLED, "delete-entry" → Task 14
     acts, "delete-route" was already executed in-core.
+
+Chain surgery layer (Task 14, binding for Tasks 15/16):
+    ``chain_entries``/``write_chain`` translate between a route block
+    and an ordered entry chain: category → its ``models`` list; agent →
+    ``model`` (index 0) + ``fallback_models`` (indices 1+), with the
+    Task 5 observed-pair collapse — an agent model ref that is a dict
+    whose ONLY key is ``model`` collapses to the bare string; category
+    dict entries NEVER collapse.  ``add_route``/``rename_route``/
+    ``delete_route_by_name``/``move_chain_entry``/``remove_chain_entry``
+    /``set_entry`` mutate the document and report via ``OperationResult``
+    without touching ``EditorState`` (the shell marks dirty).
+    ``apply_transition`` is that shell glue for a ``handle_key``
+    transition: it performs the deferred move/delete-entry surgery,
+    marks dirty where the core could not (delete-entry — moves already
+    set it in-core), clamps ``entry_index`` after removal, and returns
+    a ``ShellPrompt`` for "add" (None otherwise).  Removing an agent's
+    primary promotes fallback[0] via write-back; an empty agent chain
+    removes both keys.
 """
 # allow: SIZE_OK — plan-pinned single-module layout (Tasks 14/15/16
 # extend this file): pure core + thin shell, mirroring tui.py.
@@ -129,6 +147,179 @@ def route_entry_count(item: RouteItem | None) -> int:
     if isinstance(fallbacks, list):
         count += len(fallbacks)
     return count
+
+
+# ── chain surgery (Task 14) ────────────────────────────────────────
+#
+# The PURE-EMIT boundary above defers all entry-level document work to
+# this layer.  The operations mutate the document and report via
+# ``OperationResult`` — they never touch ``EditorState``; marking
+# dirty is the shell's job (via ``apply_transition`` or directly).
+
+
+class OperationResult(NamedTuple):
+    ok: bool
+    message: str
+
+
+_SECTION_FOR_KIND = {"agent": "agents", "category": "categories"}
+
+
+def chain_entries(item: RouteItem) -> list:
+    """Ordered chain of one route as LIVE entry references inside a
+    fresh list: category → its ``models`` list; agent → ``model`` (when
+    the key exists) followed by ``fallback_models`` (when a list).
+    Malformed pieces read as absent (≙ ``route_entry_count``)."""
+    if item.kind == "category":
+        models = item.block.get("models")
+        return list(models) if isinstance(models, list) else []
+    entries: list = []
+    if "model" in item.block:
+        entries.append(item.block["model"])
+    fallbacks = item.block.get("fallback_models")
+    if isinstance(fallbacks, list):
+        entries.extend(fallbacks)
+    return entries
+
+
+def _collapse_agent_entry(entry):
+    """Task 5 observed-pair rule: an agent model ref that is a dict
+    whose ONLY key is ``model`` collapses to the bare model string."""
+    if isinstance(entry, dict) and set(entry) == {"model"}:
+        return entry["model"]
+    return entry
+
+
+def write_chain(item: RouteItem, entries: list) -> None:
+    """Write a full chain back into ``item.block`` in place.
+
+    Category: ``block["models"] = entries`` — dict entries never
+    collapse (Task 5 asymmetry); an absent ``models`` key is not
+    invented for an empty write.  Agent: first entry → ``model``,
+    rest → ``fallback_models`` (collapse per ``_collapse_agent_entry``
+    on both); an empty chain removes BOTH keys.  Every other block key
+    (reasoning, description, tools…) is preserved untouched.
+    """
+    block = item.block
+    if item.kind == "category":
+        if entries or "models" in block:
+            block["models"] = entries
+        return
+    if entries:
+        block["model"] = _collapse_agent_entry(entries[0])
+        block["fallback_models"] = [
+            _collapse_agent_entry(entry) for entry in entries[1:]]
+    else:
+        block.pop("model", None)
+        block.pop("fallback_models", None)
+
+
+def add_route(doc: EditorDocument, kind: str, name: str) -> OperationResult:
+    """Create ``{}`` under the kind's section map, creating the map
+    (and the ``[opencode]`` harness) when absent."""
+    section_name = _SECTION_FOR_KIND.get(kind)
+    if section_name is None:
+        return OperationResult(False, f"Unknown route kind: {kind}")
+    if not name:
+        return OperationResult(False, "Route name must not be empty")
+    harness = doc.document.setdefault("[opencode]", {})
+    if not isinstance(harness, dict):
+        return OperationResult(
+            False, "Cannot add route: '[opencode]' is not an object")
+    section = harness.setdefault(section_name, {})
+    if not isinstance(section, dict):
+        return OperationResult(
+            False, f"Cannot add route: '{section_name}' is not an object")
+    if name in section:
+        return OperationResult(False, f"Route '{name}' already exists")
+    section[name] = {}
+    return OperationResult(True, f"Route added: {name}")
+
+
+def rename_route(doc: EditorDocument, kind: str, old: str,
+                 new: str) -> OperationResult:
+    """Rename preserving the route's insertion position (the section
+    dict is rebuilt with the new key at the old slot, same block)."""
+    section = _route_section(doc, kind)
+    if section is None:
+        return OperationResult(False, f"Route '{old}' not found")
+    if not new:
+        return OperationResult(False, "Route name must not be empty")
+    if old not in section:
+        return OperationResult(False, f"Route '{old}' not found")
+    if new in section:
+        return OperationResult(False, f"Route '{new}' already exists")
+    rebuilt = {(new if key == old else key): value
+               for key, value in section.items()}
+    section.clear()
+    section.update(rebuilt)
+    return OperationResult(True, f"Route renamed: {old} -> {new}")
+
+
+def delete_route_by_name(doc: EditorDocument, kind: str,
+                         name: str) -> OperationResult:
+    section = _route_section(doc, kind)
+    if section is None or name not in section:
+        return OperationResult(False, f"Route '{name}' not found")
+    del section[name]
+    return OperationResult(True, f"Route deleted: {name}")
+
+
+def _route_section(doc: EditorDocument, kind: str) -> dict | None:
+    """The kind's section map, or None when anything along the path is
+    missing or malformed (malformed ≙ absent)."""
+    section_name = _SECTION_FOR_KIND.get(kind)
+    if section_name is None:
+        return None
+    harness = doc.document.get("[opencode]") \
+        if isinstance(doc.document, dict) else None
+    if not isinstance(harness, dict):
+        return None
+    section = harness.get(section_name)
+    return section if isinstance(section, dict) else None
+
+
+def move_chain_entry(item: RouteItem, from_index: int,
+                     to_index: int) -> OperationResult:
+    """Bounds-checked remove+insert at the target (adjacent or
+    arbitrary); ``from == to`` is an ok TRUE no-op (no rewrite)."""
+    entries = chain_entries(item)
+    if not 0 <= from_index < len(entries):
+        return OperationResult(False, f"Invalid entry index: {from_index}")
+    if not 0 <= to_index < len(entries):
+        return OperationResult(False, f"Invalid entry index: {to_index}")
+    if from_index != to_index:
+        entries.insert(to_index, entries.pop(from_index))
+        write_chain(item, entries)
+    return OperationResult(True, "Entry moved")
+
+
+def remove_chain_entry(item: RouteItem, index: int) -> OperationResult:
+    """Remove one entry.  Agent index 0 removal is PRIMARY PROMOTION:
+    the write-back re-splits the chain, so fallback[0] becomes
+    ``model`` (collapsing per the observed-pair rule) and an emptied
+    chain removes both keys."""
+    entries = chain_entries(item)
+    if not 0 <= index < len(entries):
+        return OperationResult(False, f"Invalid entry index: {index}")
+    del entries[index]
+    write_chain(item, entries)
+    return OperationResult(True, "Entry removed")
+
+
+def set_entry(item: RouteItem, index: int, entry) -> OperationResult:
+    """Replace the entry at *index*; ``index == len(chain)`` is the
+    past-end APPEND sentinel (Task 13's ``a`` key).  The agent collapse
+    rule applies on write; category entries keep their dict form."""
+    entries = chain_entries(item)
+    if not 0 <= index <= len(entries):
+        return OperationResult(False, f"Invalid entry index: {index}")
+    if index == len(entries):
+        entries.append(entry)
+    else:
+        entries[index] = entry
+    write_chain(item, entries)
+    return OperationResult(True, "Entry saved")
 
 
 # ── state ─────────────────────────────────────────────────────────
@@ -439,6 +630,59 @@ def _key_raw_view(state: EditorState, key: str) -> tuple[str, object]:
         _back_to_prev(state)
         return "close", None
     return "none", None
+
+
+# ── shell glue (Task 14) ───────────────────────────────────────────
+#
+# ``apply_transition`` performs the shell-side document work the PURE
+# core deferred (move payloads, delete-entry confirm) and hands the
+# shell a prompt spec for actions needing a Textbox ("add").  It never
+# duplicates in-core work: route deletion already happened inside
+# ``handle_key``, and moves were already flagged dirty there.
+
+
+class ShellPrompt(NamedTuple):
+    kind: str       # prompt flow, e.g. "route-name"
+    prompt: str     # Textbox label for the shell to render
+    target: str     # what the collected name targets ("agent"|"category")
+
+
+def apply_transition(doc: EditorDocument, state: EditorState,
+                     transition: StateTransition) -> ShellPrompt | None:
+    """Shell-side work for one ``handle_key`` transition: move
+    payloads → ``move_chain_entry``; confirm-yes "delete-entry" →
+    ``remove_chain_entry`` (+dirty, +entry_index clamp); "add" → a
+    ``ShellPrompt`` naming the Textbox to open (kind follows the
+    selected route, defaulting to agent).  None for everything else."""
+    action, payload = transition.action, transition.payload
+    if action in ("move-up", "move-down"):
+        if isinstance(payload, tuple) and len(payload) == 2:
+            item = _selected_route(doc, state)
+            if item is not None:
+                move_chain_entry(item, payload[0], payload[1])
+        return None
+    if action == "confirm-yes" and payload == "delete-entry":
+        item = _selected_route(doc, state)
+        if item is not None \
+                and remove_chain_entry(item, state.entry_index).ok:
+            state.dirty = True   # the core could not set it here
+            state.entry_index = _clamp_index(
+                state.entry_index, route_entry_count(item))
+        return None
+    if action == "add":
+        routes = doc.routes()
+        kind = routes[state.route_index].kind \
+            if 0 <= state.route_index < len(routes) else "agent"
+        return ShellPrompt("route-name", "New route name: ", kind)
+    return None
+
+
+def _selected_route(doc: EditorDocument,
+                    state: EditorState) -> RouteItem | None:
+    routes = doc.routes()
+    if 0 <= state.route_index < len(routes):
+        return routes[state.route_index]
+    return None
 
 
 # ── input components (pure) ───────────────────────────────────────
