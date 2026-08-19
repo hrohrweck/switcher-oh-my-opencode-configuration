@@ -104,6 +104,7 @@ __all__ = [
     "ReplaceFormState", "replace_form_key", "replace_hit_lines",
     "build_replace_preview", "REPLACE_EMPTY_OLD_ERROR",
     "LegacyCandidate", "ImportScreenState", "import_screen_key",
+    "OnboardingState", "onboarding_key", "build_onboarding_state",
     "_safe_addstr", "_draw_acs_border", "_draw_ascii_border",
     "_run_legacy_imports",
 ]
@@ -398,6 +399,9 @@ class SelectorServices(NamedTuple):
     ``edit_fn(name) -> EditorResult``; ``replace_fn(name_or_None, old,
     new, dry_run) -> ReplaceResult`` (``None`` name ⇒ all profiles);
     ``import_fn(paths) -> list[LegacyCandidate]`` (read-only).
+    Task-17 seam: ``capture_fn(name) -> UseResult`` captures the live
+    ``omo.jsonc`` as a profile — the onboarding modal requires BOTH
+    ``import_fn`` and ``capture_fn`` before it offers itself.
     """
 
     use_fn: Callable[[str], UseResult]
@@ -407,6 +411,7 @@ class SelectorServices(NamedTuple):
     edit_fn: Callable[[str], object] | None = None
     replace_fn: Callable[..., ReplaceResult] | None = None
     import_fn: Callable[[Paths], list] | None = None
+    capture_fn: Callable[[str], UseResult] | None = None
 
 
 # ── replace-model form (pure core; Task 16) ────────────────────────
@@ -592,6 +597,106 @@ def _run_legacy_imports(paths: Paths, state: ImportScreenState) -> None:
                       if line.strip()), f"import failed ({code})")
         state.status_lines.append(first)
     state.done = True
+
+
+# ── first-run onboarding modal (pure core; Task 17) ────────────────
+
+@dataclass
+class OnboardingState:
+    """Modal onboarding state (no curses, no I/O).
+
+    ``numbers``/``actions``/``labels`` are parallel rows with CANONICAL
+    option numbers (1 = capture current, 2 = legacy import, 3 = skip);
+    unavailable sources are omitted but never renumbered — matching the
+    plain CLI chooser.  The LAST row is always ``"skip"`` (q/Esc select
+    it).  ``status`` carries the outcome line of the chosen action;
+    ``done`` marks the still-empty-after-action ack screen (any key then
+    closes the session).
+    """
+
+    numbers: list[int]
+    actions: list[str]
+    labels: list[str]
+    cursor: int = 0
+    status: str = ""
+    done: bool = False
+
+
+def onboarding_key(state: OnboardingState,
+                   key: str) -> str | None:
+    """Apply *key*; returns ``"select"`` / ``"close"`` / None.
+
+    Up/down move (clamped); Enter selects the cursor row; a digit
+    selects the row carrying that CANONICAL number; q/Esc select the
+    trailing Skip row; any key after ``done`` returns ``"close"``.
+    """
+    if state.done:
+        return "close"
+    if key == "up":
+        state.cursor = max(0, state.cursor - 1)
+        return None
+    if key == "down":
+        state.cursor = min(len(state.actions) - 1, state.cursor + 1)
+        return None
+    if key in ("q", "esc"):
+        state.cursor = len(state.actions) - 1
+        return "select"
+    if key == "enter":
+        return "select"
+    if len(key) == 1 and "1" <= key <= "9":
+        for index, number in enumerate(state.numbers):
+            if number == int(key):
+                state.cursor = index
+                return "select"
+    return None
+
+
+def build_onboarding_state(paths: Paths,
+                           services: SelectorServices) -> OnboardingState:
+    """Detect importable sources (read-only) and build the option rows.
+
+    Mirrors the plain CLI chooser: row 1 appears when the live
+    ``omo.jsonc`` exists, row 2 when legacy discovery finds files,
+    skip always row 3 — canonical numbers, unavailable rows omitted;
+    labels come from the CLI constants so both surfaces show identical
+    text.
+    """
+    from opencode_config_switcher.cli import (
+        ONBOARDING_CURRENT_LABEL, ONBOARDING_LEGACY_LABEL,
+        ONBOARDING_SKIP_LABEL)
+
+    numbers: list[int] = []
+    actions: list[str] = []
+    labels: list[str] = []
+    if paths.omo_path.exists():
+        numbers.append(1)
+        actions.append("current")
+        labels.append(ONBOARDING_CURRENT_LABEL)
+    if services.import_fn is not None and list(services.import_fn(paths)):
+        numbers.append(2)
+        actions.append("legacy")
+        labels.append(ONBOARDING_LEGACY_LABEL)
+    numbers.append(3)
+    actions.append("skip")
+    labels.append(ONBOARDING_SKIP_LABEL)
+    return OnboardingState(numbers=numbers, actions=actions,
+                           labels=labels)
+
+
+def _run_onboarding_action(paths: Paths, services: SelectorServices,
+                           action: str) -> str:
+    """Execute one onboarding choice through the Task 9/engine paths."""
+    if action == "skip":
+        return "Onboarding skipped"
+    if action == "current":
+        return services.capture_fn("current").message
+    entries = list(services.import_fn(paths))
+    screen = ImportScreenState(entries=entries,
+                               chosen=set(range(len(entries))))
+    _run_legacy_imports(paths, screen)
+    imported = sum(line.startswith("Imported profile:")
+                   for line in screen.status_lines)
+    return f"Imported {imported}/{len(entries)} profile(s)"
 
 
 # ── curses renderer shell ─────────────────────────────────────────
@@ -798,6 +903,22 @@ def _handle_modal_key(kind: str, mstate, key_str: str, state: AppState,
                       box: dict, services: SelectorServices,
                       paths: Paths) -> None:
     """Route one key into the open modal; closes it in ``box``."""
+    if kind == "onboard":
+        onboard: OnboardingState = mstate
+        if onboard.done:
+            box["modal"] = None
+            box["onboard_quit"] = True
+            return
+        if onboarding_key(onboard, key_str) == "select":
+            onboard.status = _run_onboarding_action(
+                paths, services, onboard.actions[onboard.cursor])
+            _refresh_menu(state, box, services)
+            if box["summaries"]:
+                box["modal"] = None
+                state.status = onboard.status
+            else:
+                onboard.done = True
+        return
     if kind == "replace":
         form: ReplaceFormState = mstate
         intent = replace_form_key(form, key_str)
@@ -835,6 +956,23 @@ def _draw_modal(stdscr, state: AppState, attrs: dict,
                      f" {text} ".ljust(width)[:width], attr)
 
     _line(0, "─" * 8, attrs["cyan"])
+    if kind == "onboard":
+        onboard: OnboardingState = mstate
+        _line(1, "No profiles found — get started", attrs["bold"])
+        row = 2
+        for index, label in enumerate(onboard.labels):
+            mark = ">" if onboard.cursor == index else " "
+            _line(row, f"{mark} {onboard.numbers[index]}) {label}",
+                  attrs["reverse"] if onboard.cursor == index
+                  else attrs["normal"])
+            row += 1
+        if onboard.done:
+            _line(row, onboard.status)
+            row += 1
+            _line(row, "(press any key)")
+            row += 1
+        _line(row, "Up/Down: move  Enter: select  q/Esc: skip")
+        return
     if kind == "replace":
         form: ReplaceFormState = mstate
         scope = (f"--all profiles"
@@ -956,6 +1094,13 @@ def run_profile_tui(summaries: list,
         _init_colors()
         attrs = _color_attrs()
         stdscr.keypad(True)
+
+        # Task 17 first-check: empty store + capable services → onboarding
+        # modal runs BEFORE the main selector loop.
+        if (not box["summaries"] and services.import_fn is not None
+                and services.capture_fn is not None):
+            box["modal"] = ("onboard",
+                            build_onboarding_state(paths, services))
 
         while True:
             # Check signal result
@@ -1148,6 +1293,8 @@ def run_profile_tui(summaries: list,
                 kind, mstate = box["modal"]
                 _handle_modal_key(kind, mstate, key_str, state, box,
                                   services, paths)
+                if box.pop("onboard_quit", False):
+                    return TuiResult(TuiOutcome.QUIT)
                 state.clamp()
                 continue
 

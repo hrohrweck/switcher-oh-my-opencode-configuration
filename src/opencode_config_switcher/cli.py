@@ -51,6 +51,12 @@ from opencode_config_switcher.transform import (
 EMPTY_STORE_HINT = ("Run 'opencode-config-switcher import --all-legacy' "
                     "or 'import --current' to get started.")
 
+ONBOARDING_HEADER = "No profiles found."
+ONBOARDING_CURRENT_LABEL = (
+    "Import current ~/.omo/omo.jsonc as profile 'current'")
+ONBOARDING_LEGACY_LABEL = "Import legacy configuration files"
+ONBOARDING_SKIP_LABEL = "Skip"
+
 
 class _Parser(argparse.ArgumentParser):
     """Usage errors exit 2 — argparse's default is pinned here on purpose."""
@@ -566,11 +572,91 @@ _HANDLERS = {
 def _run_bare(paths: Paths) -> int:
     records = list_profiles(paths)
     if not records:
+        if sys.stdin.isatty():
+            return _run_first_run(paths)
         _report_empty_store(paths)
         return 1
+    return _dispatch_bare(paths, records)
+
+
+def _dispatch_bare(paths: Paths, records: list[ProfileRecord]) -> int:
     if _interactive_terminal():
         return _run_bare_tty(paths, records)
     return _plain_selector(paths, records)
+
+
+def _run_first_run(paths: Paths) -> int:
+    """stdin-TTY bare invocation with an empty store (Task 17).
+
+    One-shot numbered chooser offering only the available sources
+    (detection is read-only); the actions reuse the Task 9 import
+    paths; afterwards the normal bare selector dispatch runs — or the
+    empty-store report when nothing was imported.
+    """
+    has_current = paths.omo_path.exists()
+    legacy = discover_legacy(paths)
+    print(ONBOARDING_HEADER)
+    if not has_current and not legacy:
+        print(f"No configuration found at {paths.omo_path} and no legacy "
+              f"files in {paths.legacy_dir}.", file=sys.stderr)
+        return 1
+    entries: list[tuple[int, str, str]] = []
+    if has_current:
+        entries.append((1, "current", ONBOARDING_CURRENT_LABEL))
+    if legacy:
+        entries.append((2, "legacy", ONBOARDING_LEGACY_LABEL))
+    entries.append((3, "skip", ONBOARDING_SKIP_LABEL))
+    choices = _choice_grammar([number for number, _, _ in entries])
+    for number, _, label in entries:
+        print(f"{number}) {label}")
+
+    try:
+        selection = input(f"Choose {choices} or q: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("Exiting without changes")
+        return _post_onboarding(paths)
+    if selection.lower() == "q":
+        print("Exiting without changes")
+        return _post_onboarding(paths)
+    number = None
+    try:
+        number = int(selection)
+    except ValueError:
+        pass
+    if number is None or not any(number == entry[0]
+                                 for entry in entries):
+        print(f"Invalid selection: {selection!r}; expected "
+              f"{choices} or q", file=sys.stderr)
+        return 2
+
+    action = next(entry[1] for entry in entries if entry[0] == number)
+    if action == "current":
+        code = _import_current(paths, "current", force=True)
+        if code != 0:
+            return code
+    elif action == "legacy":
+        for source in legacy:
+            code = _import_legacy_file(paths, source)
+            if code != 0:
+                return code
+    return _post_onboarding(paths)
+
+
+def _choice_grammar(numbers: list[int]) -> str:
+    """Compact choice list for prompts: ``1-3`` / ``2-3`` / ``1 or 3``."""
+    if len(numbers) == 1:
+        return str(numbers[0])
+    if numbers == list(range(numbers[0], numbers[-1] + 1)):
+        return f"{numbers[0]}-{numbers[-1]}"
+    return " or ".join(str(number) for number in numbers)
+
+
+def _post_onboarding(paths: Paths) -> int:
+    records = list_profiles(paths)
+    if not records:
+        _report_empty_store(paths)
+        return 1
+    return _dispatch_bare(paths, records)
 
 
 def _report_empty_store(paths: Paths) -> None:
@@ -720,6 +806,8 @@ def build_selector_services(paths: Paths):
         edit_fn=edit_fn,
         replace_fn=replace_fn,
         import_fn=import_fn,
+        capture_fn=lambda name: capture_current(paths, name,
+                                                overwrite=True),
     )
 
 
@@ -753,6 +841,9 @@ def _run_bare_tty(paths: Paths, records: list[ProfileRecord]) -> int:
     if not isinstance(outcome, TuiHandleResult):
         outcome = TuiHandleResult(outcome)
     if outcome.outcome is TuiHandleOutcome.QUIT:
+        if not list_profiles(paths):
+            _report_empty_store(paths)
+            return 1
         print("Exiting without changes")
         return 0
     if outcome.outcome in (TuiHandleOutcome.APPLIED,
