@@ -104,9 +104,12 @@ def _assert_same_value_and_order(test: unittest.TestCase,
 
 class ContractTests(unittest.TestCase):
     def test_use_status_values(self):
+        # NO_MATCHES/PREVIEW were appended by Task 7 (spec-mandated enum
+        # extension consumed by the model-replace service and Tasks 10/16).
         self.assertEqual(
             [status.value for status in UseStatus],
-            ["APPLIED", "NOOP", "BLOCKED", "FAILED"],
+            ["APPLIED", "NOOP", "BLOCKED", "FAILED",
+             "NO_MATCHES", "PREVIEW"],
         )
         self.assertIsInstance(UseStatus.APPLIED, str)
 

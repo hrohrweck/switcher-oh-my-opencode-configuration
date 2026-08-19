@@ -33,10 +33,43 @@ Contracts (binding for Tasks 7/8/9/12):
 
 - ``capture_current`` imports the live document as a profile through the
   store and NEVER touches ``omo.jsonc`` or the ``.active`` marker.
+
+Model replacement (Task 7; binding for Tasks 10/16):
+
+- ``UseStatus`` gains ``NO_MATCHES`` and ``PREVIEW`` (dry-run success,
+  zero writes) alongside the four use/capture values above.
+- ``replace_model(document, old, new)`` is pure: it returns a NEW
+  deep-copied document (the input is never mutated) plus a tuple of
+  ``ReplacementHit``s.  Hit ``field`` grammar: ``model`` /
+  ``fallback_models[{i}]`` / ``models[{i}]`` / ``catalog:{name}``;
+  ``section`` is the harness block key or ``"<root>"``; ``route`` is the
+  agent/category name, ``""`` for catalog hits.  Surfaces are walked
+  ``<root>`` first, then every HARNESS_BLOCKS block present; inside a
+  section: agents (primary, then fallback chain) -> categories ->
+  ``models`` catalog.  Exact string equality only; malformed containers
+  are skipped silently.  A bare-string ``fallback_models``/``models``
+  chain unwraps to its single entry (hit field ``{name}[0]``), mirroring
+  omoconfig normalization.
+- ``replace_model_in_profile`` reuses the BLOCKED messages above and
+  adds: ``No matches for model '{old}' in profile '{name}'``
+  (NO_MATCHES — zero writes, checked before the dry-run branch),
+  ``Would replace {n} model reference(s) in profile '{name}'``
+  (PREVIEW — zero writes), ``Replaced {n} model reference(s) in profile
+  '{name}'`` (APPLIED; write errors are FAILED with ``str(exc)``).
+  When the profile is active the engine ALWAYS re-renders through
+  ``use_profile``: an APPLIED re-render appends
+  ``; re-rendered active configuration``; NOOP/BLOCKED append nothing;
+  a FAILED re-render appends ``; re-render failed: {error}`` while the
+  overall status STAYS APPLIED — the profile write itself succeeded
+  and must not be reported as failed.
+- ``replace_model_all`` iterates ``list_profiles`` order; invalid
+  profiles surface as their BLOCKED result (skip-and-report, never
+  raises).
 """
 
 from __future__ import annotations
 
+import copy
 import shutil
 from dataclasses import dataclass
 from enum import Enum
@@ -44,6 +77,7 @@ from pathlib import Path
 
 from opencode_config_switcher.jsonc import dumps as jsonc_dumps
 from opencode_config_switcher.omoconfig import (
+    HARNESS_BLOCKS,
     LoadError,
     OmoDocument,
     load_omo_document,
@@ -55,6 +89,7 @@ from opencode_config_switcher.profiles import (
     ProfileExistsError,
     ProfileNotFoundError,
     drift_status,
+    list_profiles,
     read_active,
     read_profile,
     set_active,
@@ -64,9 +99,14 @@ from opencode_config_switcher.profiles import (
 __all__ = [
     "UseStatus",
     "UseResult",
+    "ReplacementHit",
+    "ReplaceResult",
     "render_document",
     "use_profile",
     "capture_current",
+    "replace_model",
+    "replace_model_in_profile",
+    "replace_model_all",
 ]
 
 
@@ -77,6 +117,8 @@ class UseStatus(str, Enum):
     NOOP = "NOOP"
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
+    NO_MATCHES = "NO_MATCHES"  # model replace: zero matching surfaces
+    PREVIEW = "PREVIEW"        # model replace: dry-run preview success
 
 
 @dataclass(frozen=True)
@@ -192,3 +234,178 @@ def capture_current(paths: Paths, name: str, *,
         return result(UseStatus.BLOCKED, f"Profile already exists: {name}")
 
     return result(UseStatus.APPLIED, f"Profile captured: {name}")
+
+
+# Model replacement (Task 7; binding for Tasks 10/16).
+# allow: SIZE_OK — plan-pinned single-module engine: the replace service
+# appends here (a split would add a source file the plan forbids).
+
+
+@dataclass(frozen=True)
+class ReplacementHit:
+    """One exact-match model replacement inside a profile document.
+
+    ``section`` is the harness block key (``"[opencode]"``) or
+    ``"<root>"`` for the harness-neutral document root; ``route`` is the
+    agent/category name and ``""`` for ``models``-catalog hits; ``field``
+    follows the grammar ``model`` / ``fallback_models[{i}]`` /
+    ``models[{i}]`` / ``catalog:{name}``.
+    """
+
+    section: str
+    route: str
+    field: str
+    old: str
+    new: str
+
+
+@dataclass(frozen=True)
+class ReplaceResult:
+    """Immutable result of one model-replacement operation."""
+
+    status: UseStatus
+    profile: str
+    hits: tuple[ReplacementHit, ...]
+    message: str
+    error: str | None = None
+
+
+def replace_model(document: dict, old: str,
+                  new: str) -> tuple[dict, tuple[ReplacementHit, ...]]:
+    """Exact-match replace ``old`` -> ``new``; see module docstring.
+
+    Returns a NEW deep-copied document (the input is never mutated) plus
+    every hit, walked ``<root>`` first then HARNESS_BLOCKS order; inside
+    a section: agents (primary, then fallback chain) -> categories ->
+    ``models`` catalog.  Malformed containers are skipped silently.
+    """
+
+    changed = copy.deepcopy(document)
+    hits: list[ReplacementHit] = []
+
+    def hit(section: str, route: str, field: str) -> None:
+        hits.append(ReplacementHit(section, route, field, old, new))
+
+    def replace_section(section: dict, label: str) -> None:
+        def replace_entries(block: dict, key: str, route: str) -> None:
+            """One route's ordered chain (``fallback_models``/``models``).
+
+            A bare string unwraps to its single entry (index 0), mirroring
+            ``omoconfig`` normalization; other non-list shapes are skipped.
+            """
+            entries = block.get(key)
+            if isinstance(entries, str):
+                if entries == old:
+                    block[key] = new
+                    hit(label, route, f"{key}[0]")
+                return
+            if not isinstance(entries, list):
+                return
+            for index, item in enumerate(entries):
+                if isinstance(item, str) and item == old:
+                    entries[index] = new
+                    hit(label, route, f"{key}[{index}]")
+                elif isinstance(item, dict) and item.get("model") == old:
+                    item["model"] = new  # other fields preserved
+                    hit(label, route, f"{key}[{index}]")
+
+        agents = section.get("agents")
+        if isinstance(agents, dict):
+            for name, block in agents.items():
+                if not isinstance(block, dict):
+                    continue
+                if block.get("model") == old:
+                    block["model"] = new
+                    hit(label, name, "model")
+                replace_entries(block, "fallback_models", name)
+        categories = section.get("categories")
+        if isinstance(categories, dict):
+            for name, block in categories.items():
+                if isinstance(block, dict):
+                    replace_entries(block, "models", name)
+        catalog = section.get("models")
+        if isinstance(catalog, dict):
+            for name, item in catalog.items():
+                field = f"catalog:{name}"
+                if isinstance(item, str) and item == old:
+                    catalog[name] = new
+                    hit(label, "", field)
+                elif isinstance(item, dict) and item.get("model") == old:
+                    item["model"] = new
+                    hit(label, "", field)
+
+    sections: list[tuple[str, dict]] = [("<root>", changed)]
+    for block_key in HARNESS_BLOCKS:
+        if isinstance(changed.get(block_key), dict):
+            sections.append((block_key, changed[block_key]))
+    for label, section in sections:
+        replace_section(section, label)
+    return changed, tuple(hits)
+
+
+def replace_model_in_profile(paths: Paths, name: str, old: str, new: str, *,
+                             dry_run: bool = False) -> ReplaceResult:
+    """Replace ``old`` with ``new`` in stored profile ``name``; module doc."""
+
+    def result(status: UseStatus, hits: tuple[ReplacementHit, ...] = (),
+               message: str = "",
+               error: str | None = None) -> ReplaceResult:
+        return ReplaceResult(status=status, profile=name, hits=hits,
+                             message=message, error=error)
+
+    try:
+        record = read_profile(paths, name)
+    except InvalidProfileName as exc:
+        return result(UseStatus.BLOCKED, message=str(exc))
+    except ProfileNotFoundError:
+        return result(UseStatus.BLOCKED,
+                      message=f"Profile '{name}' not found")
+
+    if not record.is_valid or record.document is None:
+        return result(
+            UseStatus.BLOCKED,
+            message=f"Cannot apply invalid profile: {name}: {record.error}",
+            error=record.error,
+        )
+
+    changed_doc, hits = replace_model(record.document.raw, old, new)
+    if not hits:
+        return result(
+            UseStatus.NO_MATCHES,
+            message=f"No matches for model '{old}' in profile '{name}'",
+        )
+    if dry_run:
+        return result(
+            UseStatus.PREVIEW, hits,
+            f"Would replace {len(hits)} model reference(s) "
+            f"in profile '{name}'",
+        )
+
+    try:
+        write_profile(paths, name, changed_doc, overwrite=True)
+    except Exception as exc:
+        return result(UseStatus.FAILED, hits, str(exc), error=str(exc))
+
+    message = f"Replaced {len(hits)} model reference(s) in profile '{name}'"
+    if read_active(paths) == name:
+        rerender = use_profile(paths, name)
+        if rerender.status == UseStatus.APPLIED:
+            message += "; re-rendered active configuration"
+        elif rerender.status == UseStatus.FAILED:
+            message += f"; re-render failed: {rerender.error}"
+    return result(UseStatus.APPLIED, hits, message)
+
+
+def replace_model_all(paths: Paths, old: str, new: str, *,
+                      dry_run: bool = False) -> list[tuple[str, ReplaceResult]]:
+    """Replace in every stored profile, ``list_profiles`` order.
+
+    Invalid profiles surface as their BLOCKED result (skip-and-report);
+    never raises for per-profile failures.
+    """
+    return [
+        (record.name,
+         replace_model_in_profile(paths, record.name, old, new,
+                                  dry_run=dry_run))
+        for record in list_profiles(paths)
+    ]
