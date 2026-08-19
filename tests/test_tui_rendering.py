@@ -171,14 +171,16 @@ class WideFrameTests(FakeWindowTestCase):
         self.assertEqual(beta[0][3], 0)
 
     def test_footer_hides_editor_keys(self):
-        self._run([_summary("alpha")], [ord("q")])
-        footers = self._footer_calls()
-        self.assertTrue(footers, "a footer line was drawn")
-        for _, _, text, _ in footers:
-            self.assertNotIn("e: edit", text)
-            self.assertNotIn("i: import", text)
-            self.assertNotIn("r: replace", text)
-            self.assertIn("q: quit", text)
+        import opencode_config_switcher.tui as tui_mod
+        with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", False):
+            self._run([_summary("alpha")], [ord("q")])
+            footers = self._footer_calls()
+            self.assertTrue(footers, "a footer line was drawn")
+            for _, _, text, _ in footers:
+                self.assertNotIn("e: edit", text)
+                self.assertNotIn("i: import", text)
+                self.assertNotIn("r: replace", text)
+                self.assertIn("q: quit", text)
 
     def test_overlay_draws_cached_raw_text(self):
         raw = '{"alpha-raw-marker": true}'

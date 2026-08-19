@@ -99,14 +99,15 @@ class ComposeFooterTests(unittest.TestCase):
         self.assertEqual(footer, "q/Ctrl-C quit")
 
     def test_editor_keys_hidden_while_unavailable(self):
-        for state in (self._state(),
-                      self._state(layout=LayoutMode.NARROW),
-                      self._state(layout=LayoutMode.NARROW,
-                                  narrow_pane=NarrowPane.DETAILS)):
-            footer = compose_footer(state)
-            self.assertNotIn("e: edit", footer)
-            self.assertNotIn("i: import", footer)
-            self.assertNotIn("r: replace", footer)
+        with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", False):
+            for state in (self._state(),
+                          self._state(layout=LayoutMode.NARROW),
+                          self._state(layout=LayoutMode.NARROW,
+                                      narrow_pane=NarrowPane.DETAILS)):
+                footer = compose_footer(state)
+                self.assertNotIn("e: edit", footer)
+                self.assertNotIn("i: import", footer)
+                self.assertNotIn("r: replace", footer)
 
     def test_editor_keys_advertised_when_available(self):
         with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", True):

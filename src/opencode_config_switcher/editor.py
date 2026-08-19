@@ -1099,15 +1099,20 @@ def _editor_loop(surface, profile_name: str, document: dict,
                  save_cb: _SaveCb) -> EditorResult:
     doc = EditorDocument(profile_name, document)
     state = EditorState()
+    form: FormState | None = None
     _best_effort(lambda: surface.keypad(True))
     _best_effort(lambda: curses.curs_set(0))
     raw_offset = 0
     while True:
-        _render(surface, state, doc, raw_offset)
+        _render(surface, state, doc, raw_offset, form)
         key = _read_key(surface)
         if key is None:
             continue
-        trans = handle_key(state, key, doc)
+        if state.screen in (EditorScreen.MODEL_ENTRY_FORM,
+                            EditorScreen.SETTINGS_FORM) and form:
+            trans = _form_transition(state, doc, form, key)
+        else:
+            trans = handle_key(state, key, doc)
         if state.screen is EditorScreen.RAW_VIEW \
                 and isinstance(trans.payload, int):
             raw_offset = max(0, raw_offset + trans.payload)
@@ -1117,15 +1122,133 @@ def _editor_loop(surface, profile_name: str, document: dict,
             return EditorResult(EditorOutcome.CANCELLED, document, None)
         if trans.action == "confirm-yes" and trans.payload == "quit":
             return EditorResult(EditorOutcome.CANCELLED, document, None)
-        if trans.action == "save":
+        if trans.action == "save" and form is not None \
+                and state.screen in (EditorScreen.MODEL_ENTRY_FORM,
+                                     EditorScreen.SETTINGS_FORM):
+            if _apply_form(state, doc, form):
+                form = None
+        elif trans.action == "save":
             save_cb(profile_name, document)
             return EditorResult(EditorOutcome.SAVED, document, None)
-        if trans.action in ("add", "rename"):
-            # Task 14 wires real add/rename; the shell only collects.
-            label = ("New name: " if trans.action == "rename"
-                     else "New route name: ")
-            name = _prompt_text(surface, label)
-            state.status = f"name: {name}" if name else ""
+        else:
+            prompt = apply_transition(doc, state, trans)
+            if trans.action in ("open-entry", "open-form",
+                                "open-settings"):
+                form = _build_form(doc, state, trans.action)
+            elif trans.action in ("add", "rename"):
+                _shell_add_or_rename(surface, doc, state, trans, prompt)
+        # Keep the form across CONFIRM (a declined dirty-quit returns
+        # to it); drop it on every other non-form screen.
+        if state.screen not in (EditorScreen.MODEL_ENTRY_FORM,
+                                EditorScreen.SETTINGS_FORM,
+                                EditorScreen.CONFIRM):
+            form = None
+
+
+def _build_form(doc: EditorDocument, state: EditorState,
+                action: str) -> FormState:
+    """FormState for one freshly opened form screen."""
+    if action == "open-settings":
+        harness = doc.document.get("[opencode]") \
+            if isinstance(doc.document, dict) else None
+        return build_settings_form(harness if isinstance(harness, dict)
+                                   else {})
+    item = _selected_route(doc, state)
+    if action == "open-form" or item is None:
+        return build_entry_form("")
+    entries = chain_entries(item)
+    entry = entries[state.entry_index] \
+        if 0 <= state.entry_index < len(entries) else ""
+    return build_entry_form(entry)
+
+
+def _form_transition(state: EditorState, doc: EditorDocument,
+                     form: FormState, key: str) -> StateTransition:
+    """Route one key on an open form; see the forms-layer docstring.
+
+    q/CTRL_C/Esc/Enter/S go through the PURE core (global quit /
+    close / advance-or-save); printable and backspace keys edit the
+    field under the FormState cursor (text/number kinds); everything
+    else rides Task 15's ``handle_form_key`` (move/toggle/cycle).
+    """
+    if key in ("q", "CTRL_C", "esc"):
+        return handle_key(state, key, doc)
+    if key in ("enter", "S"):
+        state.field_count = len(form.fields)
+        state.field_index = (form.cursor if key == "enter"
+                             else len(form.fields) - 1)
+        trans = handle_key(state, key, doc)
+        if trans.action != "save":
+            form.cursor = state.field_index
+        return trans
+    if key == "backspace":
+        field = form.fields[form.cursor]
+        if field.kind in ("text", "number"):
+            text = "" if field.value is None else str(field.value)
+            form.fields[form.cursor] = field._replace(
+                value=text[:-1] or None)
+        return StateTransition(False, "none", None)
+    if len(key) == 1 and key != " ":
+        field = form.fields[form.cursor]
+        if field.kind in ("text", "number"):
+            text = "" if field.value is None else str(field.value)
+            form.fields[form.cursor] = field._replace(value=text + key)
+        return StateTransition(False, "none", None)
+    handle_form_key(form, key)
+    return StateTransition(False, "none", None)
+
+
+def _apply_form(state: EditorState, doc: EditorDocument,
+                form: FormState) -> bool:
+    """Validate + apply the open form; True when it closed."""
+    if any(field.name == "model" for field in form.fields):
+        item = _selected_route(doc, state)
+        if item is None:
+            form.error = "No route selected"
+            state.status = form.error
+            return False
+        result = apply_entry_form(item, state.entry_index, form)
+    else:
+        if not isinstance(doc.document, dict):
+            form.error = "Document is not an object"
+            state.status = form.error
+            return False
+        harness = doc.document.setdefault("[opencode]", {})
+        if not isinstance(harness, dict):
+            form.error = "'[opencode]' is not an object"
+            state.status = form.error
+            return False
+        result = apply_settings_form(harness, form)
+    state.status = result.message
+    if not result.ok:
+        return False
+    state.dirty = True
+    _back_to_prev(state)
+    return True
+
+
+def _shell_add_or_rename(surface, doc: EditorDocument,
+                         state: EditorState,
+                         trans: StateTransition,
+                         prompt: "ShellPrompt | None") -> None:
+    """Collect the name for add/rename and run the Task 14 surgery."""
+    label = (prompt.prompt if prompt is not None
+             else "New name: " if trans.action == "rename"
+             else "New route name: ")
+    name = _prompt_text(surface, label)
+    if trans.action == "add":
+        target = prompt.target if prompt is not None else "agent"
+        result = add_route(doc, target, name)
+    else:
+        item = _selected_route(doc, state)
+        if item is None or not name:
+            state.status = "Route name must not be empty" \
+                if not name else "No route selected"
+            return
+        result = rename_route(doc, item.kind, item.name, name)
+    state.status = result.message
+    if result.ok:
+        state.dirty = True
 
 
 def _best_effort(fn) -> None:
@@ -1147,6 +1270,7 @@ def _read_key(surface) -> str | None:
         curses.KEY_LEFT: "left", curses.KEY_RIGHT: "right",
         curses.KEY_PPAGE: "pageup", curses.KEY_NPAGE: "pagedown",
         10: "enter", 13: "enter", 27: "esc", 32: " ", 3: "CTRL_C",
+        127: "backspace", curses.KEY_BACKSPACE: "backspace",
     }
     if code in special:
         return special[code]
@@ -1155,21 +1279,70 @@ def _read_key(surface) -> str | None:
     return None
 
 
+def _entry_display(entry) -> str:
+    """One chain entry rendered for the ROUTE_EDITOR list."""
+    if isinstance(entry, dict):
+        model = entry.get("model")
+        suffix = "" if len(entry) <= 1 else f" (+{len(entry) - 1} fields)"
+        return f"{model}{suffix}"
+    return str(entry)
+
+
 def _render(surface, state: EditorState, doc: EditorDocument,
-            raw_offset: int) -> None:
+            raw_offset: int, form: "FormState | None" = None) -> None:
     try:
+        import json as _json
+
         surface.erase()
         max_y, max_x = surface.getmaxyx()
-        lines = [f" Profile: {doc.name}",
-                 f" Screen:  {state.screen.value}"]
-        if state.screen is EditorScreen.RAW_VIEW:
-            lines.append(f" Raw JSON (scroll offset {raw_offset})")
+        lines: list[tuple[str, int]] = []
+        bold = 0
+        head = [
+            (f" Profile: {doc.name}", 0),
+            (f" Screen:  {state.screen.value}", 0),
+        ]
         if state.dirty:
-            lines.append(" [modified]")
+            head.append((" [modified]", bold))
         if state.status:
-            lines.append(f" {state.status}")
-        for row, text in enumerate(lines[:max(0, max_y - 1)]):
-            surface.addstr(row, 0, text[:max(0, max_x - 1)])
+            head.append((f" {state.status}", 0))
+        lines.extend(head)
+
+        if state.screen is EditorScreen.RAW_VIEW:
+            lines.append((f" Raw JSON (scroll offset {raw_offset})", 0))
+            raw_lines = _json.dumps(doc.document, indent=2,
+                                    ensure_ascii=False).splitlines()
+            for raw_line in raw_lines[raw_offset:]:
+                lines.append((f" {raw_line}", 0))
+        elif state.screen is EditorScreen.ROUTE_LIST:
+            for index, item in enumerate(doc.routes()):
+                count = (item.models_list_len if item.kind == "category"
+                         else route_entry_count(item))
+                mark = ">" if index == state.route_index else " "
+                lines.append((f" {mark} {item.kind} {item.name} "
+                              f"({count} entries)", 0))
+            if not doc.routes():
+                lines.append((" (no routes — a to add)", 0))
+        elif state.screen is EditorScreen.ROUTE_EDITOR:
+            item = _selected_route(doc, state)
+            if item is not None:
+                lines.append((f" Route: {item.name} ({item.kind})", bold))
+                for index, entry in enumerate(chain_entries(item)):
+                    mark = ">" if index == state.entry_index else " "
+                    lines.append((f"   {mark} {index}. "
+                                  f"{_entry_display(entry)}", 0))
+        elif form is not None:
+            for index, field in enumerate(form.fields):
+                mark = ">" if index == form.cursor else " "
+                lines.append((f" {mark} {field.name}: "
+                              f"{'' if field.value is None else field.value}",
+                              0))
+            extras = ", ".join(form.extra_preserved) or "none"
+            lines.append((f" preserved keys: {extras}", 0))
+            if form.error:
+                lines.append((f" ! {form.error}", bold))
+
+        for row, (text, attr) in enumerate(lines[:max(0, max_y - 1)]):
+            surface.addstr(row, 0, text[:max(0, max_x - 1)], attr)
         surface.addstr(max_y - 1, 0,
                        " Up/Down: move  Enter: open  a: add  x: delete  "
                        "S: save  q: quit"[:max(0, max_x - 1)])

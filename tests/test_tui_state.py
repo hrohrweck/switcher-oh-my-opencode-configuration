@@ -289,11 +289,12 @@ class EditorFlagTests(unittest.TestCase):
     """e/i/r are registered but inert while EDITOR_AVAILABLE is False."""
 
     def test_eir_no_intent_while_unavailable(self):
-        for lm in (LayoutMode.WIDE, LayoutMode.NARROW):
-            for pane in (NarrowPane.MENU, NarrowPane.DETAILS):
-                s = AppState(config_count=2, layout=lm, narrow_pane=pane)
-                for k in ("e", "i", "r"):
-                    self.assertIsNone(handle_key(s, k))
+        with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", False):
+            for lm in (LayoutMode.WIDE, LayoutMode.NARROW):
+                for pane in (NarrowPane.MENU, NarrowPane.DETAILS):
+                    s = AppState(config_count=2, layout=lm, narrow_pane=pane)
+                    for k in ("e", "i", "r"):
+                        self.assertIsNone(handle_key(s, k))
 
     def test_eir_intents_when_available(self):
         with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", True):
@@ -308,8 +309,8 @@ class EditorFlagTests(unittest.TestCase):
                          narrow_pane=NarrowPane.DETAILS)
             self.assertEqual(handle_key(s, "e"), "edit")
 
-    def test_flag_defaults_false(self):
-        self.assertFalse(tui_mod.EDITOR_AVAILABLE)
+    def test_flag_defaults_true(self):
+        self.assertTrue(tui_mod.EDITOR_AVAILABLE)
 
 
 if __name__ == "__main__":

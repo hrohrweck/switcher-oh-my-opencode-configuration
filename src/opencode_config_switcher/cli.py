@@ -14,6 +14,7 @@ import os
 import sys
 from enum import Enum, auto
 from pathlib import Path
+from typing import NamedTuple
 
 from opencode_config_switcher import __version__
 from opencode_config_switcher.config import parse_all
@@ -103,6 +104,9 @@ def _build_parser() -> _Parser:
     delete.add_argument("name", help="profile name")
     delete.add_argument("--yes", action="store_true",
                         help="delete without prompting")
+    edit = sub.add_parser("edit", parents=[_VERSION_PARENT],
+                          help="modify a profile in the curses editor")
+    edit.add_argument("name", help="profile name")
     importer = sub.add_parser("import", parents=[_VERSION_PARENT],
                               help="import configurations as profiles")
     importer.add_argument("--all-legacy", dest="all_legacy",
@@ -421,15 +425,71 @@ def _import_legacy_file(paths: Paths, source: Path, *,
     return 0
 
 
+# ── edit (Task 16; shared by the CLI subcommand and the TUI seam) ──
+
+def _editor_save_cb(paths: Paths):
+    """save_cb for run_editor: store write + active re-render."""
+    def save_cb(name: str, document: dict) -> None:
+        write_profile(paths, name, document, overwrite=True)
+        if read_active(paths) == name:
+            use_profile(paths, name)
+    return save_cb
+
+
+def _run_profile_editor(paths: Paths,
+                        record: ProfileRecord) -> "EditorResult":
+    """Run the curses editor on a FRESH deep copy of the record's
+    document (the editor mutates in place; a cached document must never
+    be handed to it) inside its own ``curses.wrapper``."""
+    import copy
+    import curses
+
+    from opencode_config_switcher import editor
+
+    document = copy.deepcopy(record.document.raw)
+    return curses.wrapper(
+        editor.run_editor_curses, record.name, document,
+        _editor_save_cb(paths))
+
+
+def _cmd_edit(paths: Paths, args: argparse.Namespace) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("Editor requires a TTY", file=sys.stderr)
+        return 1
+    try:
+        record = read_profile(paths, args.name)
+    except InvalidProfileName as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except ProfileNotFoundError:
+        print(f"Profile '{args.name}' not found", file=sys.stderr)
+        return 2
+    if not record.is_valid or record.document is None:
+        print(f"Cannot edit invalid profile: {args.name}: {record.error}",
+              file=sys.stderr)
+        return 2
+    from opencode_config_switcher.editor import EditorOutcome
+    result = _run_profile_editor(paths, record)
+    if result.outcome is EditorOutcome.SAVED:
+        print(f"Saved profile: {args.name}")
+        return 0
+    if result.outcome is EditorOutcome.CANCELLED:
+        print("No changes")
+        return 0
+    print(f"Editor error: {result.error}", file=sys.stderr)
+    return 1
+
+
 # ── replace-model (Task 10; Task 16's r-form reuses the hit grammar) ──
 
 def _replace_hit_lines(result: ReplaceResult) -> list[str]:
-    """`  {section}.{route}.{field}` per hit; empty route collapses."""
-    return [
-        f"  {hit.section}.{hit.route}.{hit.field}" if hit.route
-        else f"  {hit.section}.{hit.field}"
-        for hit in result.hits
-    ]
+    """`  {section}.{route}.{field}` per hit; empty route collapses.
+
+    Delegates to the TUI's pure formatter so the CLI preview and the
+    r-form preview pane share ONE grammar definition.
+    """
+    from opencode_config_switcher.tui import replace_hit_lines
+    return replace_hit_lines(result)
 
 
 def _print_replace_preview(result: ReplaceResult) -> None:
@@ -495,6 +555,7 @@ _HANDLERS = {
     "select": _cmd_use,
     "create": _cmd_create,
     "delete": _cmd_delete,
+    "edit": _cmd_edit,
     "import": _cmd_import,
     "replace-model": _cmd_replace_model,
 }
@@ -569,22 +630,135 @@ class TuiHandleOutcome(Enum):
     """Outcome of the interactive selector; Task 12 extends this."""
 
     QUIT = auto()
+    APPLIED = auto()
+    NOOP = auto()
 
 
-def run_tui_selector(summaries, paths: Paths) -> TuiHandleOutcome:
-    """Adapter seam over the curses selector; stubbed until Task 12.
+class TuiHandleResult(NamedTuple):
+    """Selector outcome carrying the engine UseResult (APPLIED/NOOP).
 
-    Task 12 replaces this body with the real TUI (importing curses INSIDE
-    this function — the stub never touches curses).
+    ``run_tui_selector`` returns this for apply exits; a bare
+    :class:`TuiHandleOutcome.QUIT` remains valid for quit (and for the
+    sentinel-based Task 8/9 tests).
     """
-    return TuiHandleOutcome.QUIT
+
+    outcome: TuiHandleOutcome
+    result: UseResult | None = None
+
+
+def _aggregate_replace(outcomes: list[tuple[str, ReplaceResult]],
+                       dry_run: bool) -> ReplaceResult:
+    """Fold replace_model_all results into one TUI-facing result.
+
+    Hits concatenate (preview pane renders them with the shared hit
+    grammar); the message summarizes ``{k}/{m}``; status is PREVIEW/
+    APPLIED when any profile had hits, NO_MATCHES when none did (an
+    empty store reports zero-of-zero).
+    """
+    hits = tuple(
+        hit for _, result in outcomes for hit in result.hits)
+    with_hits = sum(
+        1 for _, result in outcomes
+        if result.status in (UseStatus.PREVIEW, UseStatus.APPLIED))
+    verb = "Would replace" if dry_run else "Replaced"
+    message = (f"{verb} in {with_hits}/{len(outcomes)} profile(s)")
+    if hits:
+        status = UseStatus.PREVIEW if dry_run else UseStatus.APPLIED
+    else:
+        status = UseStatus.NO_MATCHES
+    return ReplaceResult(status=status, profile="*", hits=hits,
+                         message=message)
+
+
+def build_selector_services(paths: Paths):
+    """Real :class:`SelectorServices` over engine/store/editor.
+
+    The ONE implementation behind both the bare CLI selector and the
+    PTY fixtures (Task 16 seam; Task 17's onboarding reuses it):
+    ``edit_fn`` re-reads the profile FRESH each call; ``replace_fn``
+    targets one profile by name or every profile when the name is
+    ``None``; ``import_fn`` discovers legacy files read-only.
+    """
+    from opencode_config_switcher.editor import (
+        EditorOutcome, EditorResult)
+    from opencode_config_switcher.tui import (
+        LegacyCandidate, SelectorServices)
+
+    def edit_fn(name: str):
+        record = read_profile(paths, name)
+        if not record.is_valid or record.document is None:
+            return EditorResult(
+                EditorOutcome.TERMINATED, {},
+                f"Cannot edit invalid profile: {name}: {record.error}")
+        return _run_profile_editor(paths, record)
+
+    def replace_fn(name, old, new, dry_run):
+        if name is None:
+            return _aggregate_replace(
+                replace_model_all(paths, old, new, dry_run=dry_run),
+                dry_run)
+        return replace_model_in_profile(
+            paths, name, old, new, dry_run=dry_run)
+
+    def import_fn(p: Paths) -> list:
+        files = discover_legacy(p)
+        if not files:
+            return []
+        summaries = parse_all(files[0], files)
+        return [
+            LegacyCandidate(
+                path=file,
+                invalid=None if summary.is_valid else summary.error)
+            for file, summary in zip(files, summaries)
+        ]
+
+    return SelectorServices(
+        use_fn=lambda name: use_profile(paths, name),
+        create_fn=lambda name: create_profile(paths, name),
+        delete_fn=lambda name: delete_profile(paths, name),
+        refresh_fn=lambda: _build_summaries(paths),
+        edit_fn=edit_fn,
+        replace_fn=replace_fn,
+        import_fn=import_fn,
+    )
+
+
+def _build_summaries(paths: Paths) -> list:
+    from opencode_config_switcher.tui_data import build_summaries
+    return build_summaries(paths, list_profiles(paths))
+
+
+def run_tui_selector(summaries,
+                     paths: Paths) -> "TuiHandleOutcome | TuiHandleResult":
+    """Run the real curses selector over real services (Task 12+16).
+
+    Returns bare :class:`TuiHandleOutcome.QUIT` or a
+    :class:`TuiHandleResult` carrying the engine UseResult.
+    """
+    from opencode_config_switcher.tui import (
+        TuiOutcome, run_profile_tui)
+
+    result = run_profile_tui(
+        summaries, paths, build_selector_services(paths))
+    if result.outcome is TuiOutcome.QUIT:
+        return TuiHandleOutcome.QUIT
+    if result.outcome in (TuiOutcome.APPLIED, TuiOutcome.NOOP):
+        return TuiHandleResult(
+            TuiHandleOutcome(result.outcome.value), result.apply_result)
+    return TuiHandleResult(TuiHandleOutcome.QUIT)
 
 
 def _run_bare_tty(paths: Paths, records: list[ProfileRecord]) -> int:
-    from opencode_config_switcher.tui_data import build_summaries
-    outcome = run_tui_selector(build_summaries(paths, records), paths)
-    if outcome is TuiHandleOutcome.QUIT:
+    outcome = run_tui_selector(_build_summaries(paths), paths)
+    if not isinstance(outcome, TuiHandleResult):
+        outcome = TuiHandleResult(outcome)
+    if outcome.outcome is TuiHandleOutcome.QUIT:
         print("Exiting without changes")
         return 0
-    print(f"Unexpected selector outcome: {outcome}", file=sys.stderr)
+    if outcome.outcome in (TuiHandleOutcome.APPLIED,
+                           TuiHandleOutcome.NOOP) \
+            and outcome.result is not None:
+        return _report_use_result(outcome.result)
+    print(f"Unexpected selector outcome: {outcome.outcome}",
+          file=sys.stderr)
     return 1

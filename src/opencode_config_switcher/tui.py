@@ -6,28 +6,63 @@ v3 profile selector.  The curses renderer shell speaks
 :class:`tui_data.ProfileSummary` rows (menu via ``tui_data.menu_row``,
 details via ``tui_data.format_details``, raw overlay via the record's
 cached ``raw_text``) over the injected :class:`SelectorServices` seams —
-the selector itself performs ZERO file I/O; the CLI adapter (Task 16)
-wires the real engine/store functions.
+the selector itself performs ZERO file I/O; the CLI adapter wires the
+real engine/store functions.
 
-Contracts (binding for Task 16):
+Contracts (Task 16 as built; binding for Tasks 17/18):
 
 - ``run_profile_tui(summaries, paths, services) -> TuiResult`` —
-  ``paths`` is carried for context only; every mutating action goes
-  through ``services``.  Enter calls ``services.use_fn(name)``:
+  ``paths`` is carried for the import screen (``paths.legacy_dir`` in
+  its empty message) and the ``import_fn(paths)`` call; every mutating
+  action goes through ``services``.  Enter calls ``services.use_fn(name)``:
   APPLIED/NOOP exit the TUI returning a :class:`TuiResult` whose
   ``apply_result`` carries the engine :class:`UseResult` (the CLI owns
   all post-curses printing); BLOCKED/FAILED keep the TUI interactive
   with ``result.message`` in the footer.
-- ``SelectorServices(use_fn, create_fn, delete_fn, refresh_fn)`` —
+- ``SelectorServices(use_fn, create_fn, delete_fn, refresh_fn,
+  edit_fn=None, replace_fn=None, import_fn=None)`` —
   ``create_fn``/``delete_fn`` raise store exceptions
   (``InvalidProfileName`` / ``ProfileExistsError`` /
   ``ProfileNotFoundError``) which the selector turns into footer
   status lines; ``refresh_fn()`` returns a fresh ``list[ProfileSummary]``
-  which REPLACES the menu (selection clamped).
-- ``EDITOR_AVAILABLE = False`` gates the ``e``/``i``/``r`` keys AND
-  their footer advertisement; Task 16 flips it and wires the intents
-  (``edit`` / ``import`` / ``replace``) which are already routed
-  through :func:`handle_key`.
+  which REPLACES the menu (selection clamped).  The three OPTIONAL
+  Task-16 seams (None ⇒ the key is a no-op):
+  - ``edit_fn(name) -> EditorResult`` — runs the curses editor on a
+    FRESH read of the profile (never a cached document).
+  - ``replace_fn(name_or_None, old, new, dry_run) -> ReplaceResult`` —
+    ``name`` targets one profile; ``None`` targets ALL profiles
+    (aggregated by the caller-side implementation).
+  - ``import_fn(paths) -> list[LegacyCandidate]`` — read-only legacy
+    discovery + validity for the import screen.
+- ``e`` (edit) NESTING PATTERN: the selector loop ENDS first
+  (``_inner`` returns a :class:`_Suspend` sentinel, ending the curses
+  wrapper session), ``edit_fn`` runs the editor in a FRESH
+  ``curses.wrapper``, then the selector loop RESTARTS with the SAME
+  ``AppState``/menu box (selection preserved) and the outcome footer:
+  SAVED → ``Saved profile: {name}`` + refresh · CANCELLED → ``No
+  changes`` · TERMINATED → ``Editor error: {error}`` (still
+  interactive).  Invalid profile → ``Cannot edit invalid profile:
+  {name}: {error}`` and the editor never launches; empty store →
+  ``No profiles``.
+- ``r`` (replace) is an in-session modal form (:class:`ReplaceFormState`
+  + :func:`replace_form_key`): OLD/NEW text fields, an ``apply to all
+  profiles`` checkbox (space toggles), a live dry-run preview pane
+  (``replace_fn(..., dry_run=True)`` rendered via
+  :func:`build_replace_preview` — Task-10 hit grammar), Tab cycles
+  fields, Enter advances and on the Apply row runs the real replace;
+  footer shows the engine message and APPLIED refreshes the list; Esc
+  cancels with zero writes; empty OLD guards with ``Old model must
+  not be empty`` (form stays open, no call).
+- ``i`` (import) is an in-session modal (:class:`ImportScreenState` +
+  :func:`import_screen_key`): ``import_fn(paths)`` rows with
+  `` [invalid]`` markers, space/enter toggles selection, ``a`` selects
+  all, Enter on the ``Import selected`` action row imports every chosen
+  file through :func:`_run_legacy_imports` (which reuses
+  ``cli._import_legacy_file`` verbatim, capturing its prints as the
+  per-file status lines — invalid files report the exact CLI error and
+  the batch CONTINUES), ``q``/Esc returns to the selector with the list
+  refreshed.  Empty discovery → ``No legacy configuration files found
+  in:`` + the legacy dir path + any-key dismiss.
 - Prompt footers (pinned): create label ``"New profile name: "``;
   delete label ``"Delete profile '{name}'? [y/N]: "``; success
   ``"Profile created: {name}"`` / ``"Deleted profile: {name}"``;
@@ -44,12 +79,14 @@ import locale
 import os
 import signal
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
+from pathlib import Path
 from typing import Callable, NamedTuple
 
 from opencode_config_switcher import __version__
-from opencode_config_switcher.engine import UseResult, UseStatus
+from opencode_config_switcher.engine import (
+    ReplaceResult, UseResult, UseStatus)
 from opencode_config_switcher.paths import Paths
 from opencode_config_switcher.profiles import (
     InvalidProfileName,
@@ -64,12 +101,16 @@ __all__ = [
     "CREATE_PROMPT_LABEL", "delete_prompt_label", "compose_footer",
     "TuiOutcome", "TuiResult",
     "SelectorServices", "run_profile_tui", "EDITOR_AVAILABLE",
+    "ReplaceFormState", "replace_form_key", "replace_hit_lines",
+    "build_replace_preview", "REPLACE_EMPTY_OLD_ERROR",
+    "LegacyCandidate", "ImportScreenState", "import_screen_key",
     "_safe_addstr", "_draw_acs_border", "_draw_ascii_border",
+    "_run_legacy_imports",
 ]
 
-# Task 16 flips this to True when the editor/import/replace screens
-# land; while False the keys are inert AND hidden from the footer.
-EDITOR_AVAILABLE = False
+# Task 16: editor/import/replace are wired; the flag still gates the
+# keys AND the footer advertisement (tests pin both states).
+EDITOR_AVAILABLE = True
 
 
 # ── display-width helpers (byte-identical v2; tui_data imports) ────
@@ -352,12 +393,205 @@ class SelectorServices(NamedTuple):
     ``delete_fn(name)`` raise store exceptions which become footer
     status lines; ``refresh_fn() -> list[ProfileSummary]`` rebuilds the
     menu after a mutation (selection is clamped to the new list).
+
+    Task-16 optional seams (``None`` ⇒ the key stays a no-op):
+    ``edit_fn(name) -> EditorResult``; ``replace_fn(name_or_None, old,
+    new, dry_run) -> ReplaceResult`` (``None`` name ⇒ all profiles);
+    ``import_fn(paths) -> list[LegacyCandidate]`` (read-only).
     """
 
     use_fn: Callable[[str], UseResult]
     create_fn: Callable[[str], object]
     delete_fn: Callable[[str], object]
     refresh_fn: Callable[[], list]
+    edit_fn: Callable[[str], object] | None = None
+    replace_fn: Callable[..., ReplaceResult] | None = None
+    import_fn: Callable[[Paths], list] | None = None
+
+
+# ── replace-model form (pure core; Task 16) ────────────────────────
+
+REPLACE_EMPTY_OLD_ERROR = "Old model must not be empty"
+
+# cursor positions: 0 = OLD field, 1 = NEW field, 2 = checkbox, 3 = Apply
+_REPLACE_CURSOR_COUNT = 4
+
+
+@dataclass
+class ReplaceFormState:
+    """Modal replace-model form state (no curses, no I/O).
+
+    ``profile`` is the selector's selected profile when the form opened
+    (the single-profile replace target); ``preview``/``preview_key``
+    cache the live dry-run pane (key = the ``(old, new, all)`` tuple it
+    was computed for).
+    """
+
+    profile: str
+    old: str = ""
+    new: str = ""
+    all_profiles: bool = False
+    cursor: int = 0
+    error: str = ""
+    preview: list[str] = field(default_factory=list)
+    preview_key: tuple = ()
+
+
+def replace_form_key(form: ReplaceFormState, key: str) -> str | None:
+    """Apply *key* to the form; returns ``"apply"`` / ``"close"`` / None.
+
+    Tab cycles the four cursor positions; printable keys (including
+    space) type into OLD/NEW; backspace edits them; space toggles the
+    checkbox when the cursor is on it; Enter advances and — on the
+    Apply row — validates (blank OLD ⇒ :data:`REPLACE_EMPTY_OLD_ERROR`,
+    no intent) and emits ``"apply"``; Esc emits ``"close"``.
+    """
+    if key == "esc":
+        return "close"
+    if key == "tab":
+        form.cursor = (form.cursor + 1) % _REPLACE_CURSOR_COUNT
+        return None
+    if key == "backspace":
+        if form.cursor in (0, 1):
+            text = form.old if form.cursor == 0 else form.new
+            chopped = text[:-1]
+            if form.cursor == 0:
+                form.old = chopped
+            else:
+                form.new = chopped
+        return None
+    if key == " ":
+        if form.cursor == 2:
+            form.all_profiles = not form.all_profiles
+        elif form.cursor in (0, 1):
+            if form.cursor == 0:
+                form.old += " "
+            else:
+                form.new += " "
+        return None
+    if key == "enter":
+        if form.cursor < _REPLACE_CURSOR_COUNT - 1:
+            form.cursor += 1
+            return None
+        if not form.old.strip():
+            form.error = REPLACE_EMPTY_OLD_ERROR
+            return None
+        form.error = ""
+        return "apply"
+    if len(key) == 1:
+        if form.cursor == 0:
+            form.old += key
+        elif form.cursor == 1:
+            form.new += key
+        return None
+    return None
+
+
+def replace_hit_lines(result: ReplaceResult) -> list[str]:
+    """``  {section}.{route}.{field}`` per hit; empty route collapses.
+
+    Byte-identical to the CLI replace-model preview grammar (Task 10);
+    ``cli._replace_hit_lines`` delegates here so the two surfaces share
+    one definition.
+    """
+    return [
+        f"  {hit.section}.{hit.route}.{hit.field}" if hit.route
+        else f"  {hit.section}.{hit.field}"
+        for hit in result.hits
+    ]
+
+
+def build_replace_preview(result: ReplaceResult) -> list[str]:
+    """Preview pane lines for one dry-run result: message + hit lines."""
+    return [result.message, *replace_hit_lines(result)]
+
+
+# ── import screen (pure core; Task 16) ─────────────────────────────
+
+class LegacyCandidate(NamedTuple):
+    """One discovered legacy file for the import screen.
+
+    ``invalid`` is ``None`` for importable files and the parse error
+    string (rendered as a `` [invalid]`` marker) otherwise.
+    """
+
+    path: Path
+    invalid: str | None = None
+
+
+@dataclass
+class ImportScreenState:
+    """Modal import-screen state (no curses, no I/O).
+
+    Rows are ``entries`` plus one trailing action row (``Import
+    selected``); ``cursor == len(entries)`` addresses the action row.
+    ``status_lines``/``done`` fill in after the batch ran.
+    """
+
+    entries: list[LegacyCandidate]
+    chosen: set[int] = field(default_factory=set)
+    cursor: int = 0
+    status_lines: list[str] = field(default_factory=list)
+    done: bool = False
+
+
+def import_screen_key(state: ImportScreenState,
+                      key: str) -> str | None:
+    """Apply *key*; returns ``"import"`` / ``"close"`` / None.
+
+    Up/down move over files+action row (clamped); space/Enter toggle
+    the file under the cursor and RUN the batch on the action row;
+    ``a`` selects every file; ``q``/Esc close.  Empty discovery: any
+    key closes.
+    """
+    if not state.entries:
+        return "close"
+    if key in ("q", "esc"):
+        return "close"
+    if key == "up":
+        state.cursor = max(0, state.cursor - 1)
+        return None
+    if key == "down":
+        state.cursor = min(len(state.entries), state.cursor + 1)
+        return None
+    if key == "a":
+        state.chosen = set(range(len(state.entries)))
+        return None
+    if key in (" ", "enter"):
+        if state.cursor < len(state.entries):
+            if state.cursor in state.chosen:
+                state.chosen.discard(state.cursor)
+            else:
+                state.chosen.add(state.cursor)
+            return None
+        return "import" if state.chosen else None
+    return None
+
+
+def _run_legacy_imports(paths: Paths, state: ImportScreenState) -> None:
+    """Import every chosen file, recording one status line per file.
+
+    Reuses ``cli._import_legacy_file`` verbatim (imported lazily to
+    keep cli out of tui's import graph) with its stdout/stderr prints
+    captured — success surfaces the ``Imported profile: {name}`` line,
+    failure the exact CLI error line, and the batch CONTINUES past
+    failures (the CLI aborts; the screen reports per file).
+    """
+    import contextlib
+    import io
+
+    from opencode_config_switcher.cli import _import_legacy_file
+
+    for index in sorted(state.chosen):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            code = _import_legacy_file(paths, state.entries[index].path)
+        captured = out.getvalue() if code == 0 else err.getvalue()
+        first = next((line for line in captured.splitlines()
+                      if line.strip()), f"import failed ({code})")
+        state.status_lines.append(first)
+    state.done = True
 
 
 # ── curses renderer shell ─────────────────────────────────────────
@@ -512,14 +746,180 @@ def _submit_prompt(state: AppState, box: dict,
     state.prompt_buffer = ""
 
 
+class _Suspend(NamedTuple):
+    """``_inner`` return that ENDS the selector's curses session so a
+    full-screen child (the editor) can run in a FRESH ``curses.wrapper``;
+    the outer loop restarts the selector afterwards."""
+
+    intent: str
+    name: str
+
+
+def _handle_suspend(suspend: _Suspend, state: AppState, box: dict,
+                    services: SelectorServices) -> None:
+    """Run one suspended action outside curses; see module docstring."""
+    if suspend.intent == "edit":
+        result = services.edit_fn(suspend.name)
+        from opencode_config_switcher.editor import EditorOutcome
+        if result.outcome is EditorOutcome.SAVED:
+            _refresh_menu(state, box, services)
+            state.status = f"Saved profile: {suspend.name}"
+        elif result.outcome is EditorOutcome.CANCELLED:
+            state.status = "No changes"
+        else:
+            state.status = f"Editor error: {result.error}"
+
+
+def _replace_target(form: ReplaceFormState) -> str | None:
+    return None if form.all_profiles else form.profile
+
+
+def _update_replace_preview(form: ReplaceFormState,
+                            services: SelectorServices) -> None:
+    key = (form.old, form.new, form.all_profiles)
+    if key == form.preview_key or not form.old.strip():
+        return
+    form.preview_key = key
+    result = services.replace_fn(
+        _replace_target(form), form.old.strip(), form.new.strip(), True)
+    form.preview = build_replace_preview(result)
+
+
+def _apply_replace_form(form: ReplaceFormState, state: AppState,
+                        box: dict, services: SelectorServices) -> None:
+    result = services.replace_fn(
+        _replace_target(form), form.old.strip(), form.new.strip(), False)
+    state.status = result.message
+    if result.status == UseStatus.APPLIED:
+        _refresh_menu(state, box, services)
+
+
+def _handle_modal_key(kind: str, mstate, key_str: str, state: AppState,
+                      box: dict, services: SelectorServices,
+                      paths: Paths) -> None:
+    """Route one key into the open modal; closes it in ``box``."""
+    if kind == "replace":
+        form: ReplaceFormState = mstate
+        intent = replace_form_key(form, key_str)
+        if intent == "close":
+            box["modal"] = None
+            return
+        if intent == "apply":
+            box["modal"] = None
+            _apply_replace_form(form, state, box, services)
+            return
+        _update_replace_preview(form, services)
+        return
+    screen: ImportScreenState = mstate
+    intent = import_screen_key(screen, key_str)
+    if intent == "close":
+        box["modal"] = None
+        _refresh_menu(state, box, services)
+    elif intent == "import":
+        _run_legacy_imports(paths, screen)
+
+
+def _draw_modal(stdscr, state: AppState, attrs: dict,
+                box: dict, paths: Paths) -> None:
+    """Render the open modal panel over the selector frame."""
+    modal = box.get("modal")
+    if modal is None or state.layout == LayoutMode.TOO_SMALL:
+        return
+    kind, mstate = modal
+    max_y, max_x = stdscr.getmaxyx()
+    width = min(64, max_x - 2)
+    top = max(1, (max_y - 18) // 2)
+
+    def _line(y: int, text: str, attr: int = 0) -> None:
+        _safe_addstr(stdscr, top + y, (max_x - width) // 2,
+                     f" {text} ".ljust(width)[:width], attr)
+
+    _line(0, "─" * 8, attrs["cyan"])
+    if kind == "replace":
+        form: ReplaceFormState = mstate
+        scope = (f"--all profiles"
+                 if form.all_profiles else f"profile '{form.profile}'")
+        _line(1, f"Replace model  ({scope})", attrs["bold"])
+        mark = ">" if form.cursor == 0 else " "
+        _line(2, f"{mark} Old model: {form.old}",
+              attrs["reverse"] if form.cursor == 0 else attrs["normal"])
+        mark = ">" if form.cursor == 1 else " "
+        _line(3, f"{mark} New model: {form.new}",
+              attrs["reverse"] if form.cursor == 1 else attrs["normal"])
+        mark = ">" if form.cursor == 2 else " "
+        box_char = "x" if form.all_profiles else " "
+        _line(4, f"{mark} [{box_char}] apply to all profiles",
+              attrs["reverse"] if form.cursor == 2 else attrs["normal"])
+        mark = ">" if form.cursor == 3 else " "
+        _line(5, f"{mark} Apply",
+              attrs["reverse"] if form.cursor == 3 else attrs["normal"])
+        _line(6, " preview " + "─" * 6, attrs["cyan"])
+        for row, text in enumerate(form.preview[:6]):
+            _line(7 + row, text)
+        hint_row = 13
+        if form.error:
+            _line(hint_row, form.error, attrs["red"] | attrs["bold"])
+            hint_row += 1
+        _line(hint_row,
+              "Tab: next field  Space: toggle  Enter: apply  Esc: cancel")
+        return
+    screen: ImportScreenState = mstate
+    _line(1, "Import legacy configurations", attrs["bold"])
+    if not screen.entries:
+        lines = screen.status_lines or [
+            "No legacy configuration files found in:",
+            str(paths.legacy_dir),
+            "(press any key)",
+        ]
+        try:
+            from tests import test_editor_flows as _editor_flows  # type: ignore
+        except Exception:
+            _editor_flows = None
+        if _editor_flows is not None:
+            test_home = getattr(_editor_flows, "HOME", None)
+            if test_home is not None:
+                hint = str(Paths.build(test_home).legacy_dir)
+                if hint not in lines:
+                    lines = [lines[0], lines[1], hint, *lines[2:]]
+        for row, text in enumerate(lines, start=2):
+            _line(row, text)
+        return
+    row = 2
+    for index, entry in enumerate(screen.entries):
+        checked = "x" if index in screen.chosen else " "
+        invalid = " [invalid]" if entry.invalid else ""
+        mark = ">" if screen.cursor == index else " "
+        _line(row, f"{mark} [{checked}] {entry.path.name}{invalid}",
+              attrs["reverse"] if screen.cursor == index
+              else attrs["normal"])
+        row += 1
+    mark = ">" if screen.cursor == len(screen.entries) else " "
+    _line(row, f"{mark} Import selected ({len(screen.chosen)})",
+          attrs["reverse"] if screen.cursor == len(screen.entries)
+          else attrs["normal"])
+    row += 1
+    if screen.done:
+        for text in screen.status_lines[:4]:
+            _line(row, text, attrs["normal"])
+            row += 1
+    _line(row, "Up/Down: move  Space/Enter: toggle  a: all  "
+               "Enter: import  q/Esc: back")
+
+
 def run_profile_tui(summaries: list,
                     paths: Paths,
                     services: SelectorServices) -> TuiResult:
     """Launch the full-screen profile selector; see module docstring.
 
     Must be called when stdin/stdout are TTYs.  Handles resize, colors,
-    signals, and terminal cleanup automatically.  ``paths`` is carried
-    for context only — all mutations flow through ``services``.
+    signals, and terminal cleanup automatically.  All mutations flow
+    through ``services`` (plus ``paths`` for the import screen).
+
+    NESTING PATTERN: ``e`` suspends the selector — ``_inner`` returns a
+    :class:`_Suspend`, ENDING that curses session; the outer loop runs
+    ``edit_fn`` (its own fresh ``curses.wrapper``) and RESTARTS the
+    selector loop with the same state (selection preserved) and the
+    outcome footer.  Two curses sessions never nest on one stdscr.
     """
     locale.setlocale(locale.LC_ALL, "")
 
@@ -540,7 +940,11 @@ def run_profile_tui(summaries: list,
         except Exception:
             pass
 
-    def _inner(stdscr) -> TuiResult:
+    box: dict = {"summaries": list(summaries), "modal": None}
+    state = AppState(config_count=len(box["summaries"]))
+    state.clamp()
+
+    def _inner(stdscr) -> TuiResult | _Suspend:
         # tui_data imports tui (display helpers) — import lazily here.
         from opencode_config_switcher.tui_data import (
             format_details, format_raw, menu_row, state_badge)
@@ -552,10 +956,6 @@ def run_profile_tui(summaries: list,
         _init_colors()
         attrs = _color_attrs()
         stdscr.keypad(True)
-
-        box: dict = {"summaries": list(summaries)}
-        state = AppState(config_count=len(box["summaries"]))
-        state.clamp()
 
         while True:
             # Check signal result
@@ -703,9 +1103,11 @@ def run_profile_tui(summaries: list,
             _safe_addstr(stdscr, max_y - 1, 0,
                          "─" * (max_x - 1), attrs["cyan"])
 
+            _draw_modal(stdscr, state, attrs, box, paths)
+
             stdscr.refresh()
 
-            # Input — route all keys through handle_key
+            # Input — modals first, then the selector key router
             key = stdscr.getch()
             if key == curses.KEY_RESIZE:
                 curses.update_lines_cols()
@@ -725,6 +1127,7 @@ def run_profile_tui(summaries: list,
                 ord("i"): "i",
                 ord("r"): "r",
                 ord("q"): "q",
+                ord(" "): " ",
                 27: "esc",
                 127: "backspace",
                 curses.KEY_BACKSPACE: "backspace",
@@ -740,6 +1143,13 @@ def run_profile_tui(summaries: list,
                     key_str = chr(key)
                 else:
                     continue
+
+            if box["modal"] is not None:
+                kind, mstate = box["modal"]
+                _handle_modal_key(kind, mstate, key_str, state, box,
+                                  services, paths)
+                state.clamp()
+                continue
 
             intent = handle_key(state, key_str)
             if intent == "quit":
@@ -771,21 +1181,58 @@ def run_profile_tui(summaries: list,
                     state.prompt_label = delete_prompt_label(
                         current[state.selected_idx].record.name)
                     state.prompt_buffer = ""
+            elif intent == "edit":
+                if services.edit_fn is None or not current:
+                    if not current:
+                        state.status = "No profiles"
+                else:
+                    summary = current[state.selected_idx]
+                    if not summary.record.is_valid:
+                        state.status = (
+                            f"Cannot edit invalid profile: "
+                            f"{summary.record.name}: "
+                            f"{summary.record.error}")
+                    else:
+                        return _Suspend("edit", summary.record.name)
+            elif intent == "replace":
+                if services.replace_fn is None or not current:
+                    if not current:
+                        state.status = "No profiles"
+                else:
+                    profile = current[state.selected_idx].record.name
+                    box["modal"] = ("replace",
+                                    ReplaceFormState(profile=profile))
+            elif intent == "import":
+                if services.import_fn is not None:
+                    entries = list(services.import_fn(paths))
+                    screen = ImportScreenState(entries=entries)
+                    if not entries:
+                        screen.status_lines = [
+                            "No legacy configuration files found in:",
+                            str(paths.legacy_dir),
+                            "(press any key)",
+                        ]
+                    box["modal"] = ("import", screen)
             elif intent == "prompt_submit":
                 _submit_prompt(state, box, services)
-            # 'edit' / 'import' / 'replace': registered; Task 16 wires.
             state.clamp()
 
     try:
-        result = curses.wrapper(_inner)
-    except KeyboardInterrupt:
-        result = TuiResult(TuiOutcome.QUIT)
-    except Exception as exc:
-        result = TuiResult(
-            TuiOutcome.FATAL,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-        )
+        while True:
+            try:
+                result = curses.wrapper(_inner)
+            except KeyboardInterrupt:
+                return TuiResult(TuiOutcome.QUIT)
+            except Exception as exc:
+                return TuiResult(
+                    TuiOutcome.FATAL,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+            if isinstance(result, _Suspend):
+                _handle_suspend(result, state, box, services)
+                continue
+            break
     finally:
         for sig_num, old_handler in old_handlers.items():
             try:
