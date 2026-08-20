@@ -14,61 +14,71 @@
     },
     "agents": {
       "sisyphus": {
-        "model": "provider-1/model-1",
-        "reasoning": "max",
-        "fallback_models": [
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
           "provider-2/model-2",
           "provider-3/model-3"
         ]
       },
       "hephaestus": {
-        "model": "provider-1/model-1",
-        "reasoning": "max",
-        "fallback_models": [
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
           "provider-4/model-4",
           "provider-2/model-2"
         ]
       },
       "oracle": {
-        "model": "provider-1/model-1",
-        "reasoning": "max",
-        "fallback_models": [
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
           "provider-4/model-4"
         ]
       },
       "librarian": {
-        "model": "provider-2/model-2",
-        "fallback_models": [
+        "models": [
+          "provider-2/model-2",
           "provider-5/model-5",
           "provider-6/model-6",
           "provider-7/model-7"
         ]
       },
       "explore": {
-        "model": "provider-2/model-2",
-        "fallback_models": [
+        "models": [
+          "provider-2/model-2",
           "provider-8/model-8",
           "provider-7/model-7"
         ]
       },
       "multimodal-looker": {
-        "model": "provider-9/model-9",
-        "fallback_models": [
+        "models": [
+          "provider-9/model-9",
           "provider-10/model-10",
           "provider-11/model-11"
         ]
       },
       "prometheus": {
-        "model": "provider-1/model-1",
-        "reasoning": "max",
-        "fallback_models": [
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
           "provider-4/model-4"
         ]
       },
       "metis": {
-        "model": "provider-1/model-1",
-        "reasoning": "max",
-        "fallback_models": [
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
           {
             "model": "provider-12/model-12",
             "reasoning": "xhigh"
@@ -84,9 +94,11 @@
         ]
       },
       "momus": {
-        "model": "provider-12/model-12",
-        "reasoning": "xhigh",
-        "fallback_models": [
+        "models": [
+          {
+            "model": "provider-12/model-12",
+            "reasoning": "xhigh"
+          },
           {
             "model": "provider-1/model-1",
             "reasoning": "max"
@@ -102,9 +114,11 @@
         ]
       },
       "atlas": {
-        "model": "provider-1/model-1",
-        "reasoning": "max",
-        "fallback_models": [
+        "models": [
+          {
+            "model": "provider-1/model-1",
+            "reasoning": "max"
+          },
           {
             "model": "provider-15/model-15",
             "reasoning": "medium"
@@ -112,8 +126,8 @@
         ]
       },
       "sisyphus-junior": {
-        "model": "provider-2/model-2",
-        "fallback_models": [
+        "models": [
+          "provider-2/model-2",
           "provider-3/model-3"
         ]
       }

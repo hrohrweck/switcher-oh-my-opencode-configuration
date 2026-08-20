@@ -23,6 +23,8 @@ from opencode_config_switcher.engine import (
     UseResult,
     UseStatus,
     capture_current,
+    migrate_all,
+    migrate_profile,
     replace_model_all,
     replace_model_in_profile,
     use_profile,
@@ -140,6 +142,14 @@ def _build_parser() -> _Parser:
                         help="replace in every stored profile")
     replacer.add_argument("--dry-run", dest="dry_run", action="store_true",
                           help="preview matching routes without writing")
+    migrator = sub.add_parser(
+        "migrate", parents=[_VERSION_PARENT],
+        help="convert legacy fallback_models routes to models chains")
+    migrator.add_argument("--profile", metavar="NAME",
+                          help="migrate this one profile "
+                               "(default: every stored profile)")
+    migrator.add_argument("--dry-run", dest="dry_run", action="store_true",
+                          help="preview conversions without writing")
     return parser
 
 
@@ -553,6 +563,57 @@ def _replace_model_across_profiles(paths: Paths,
     return 0 if with_hits else 1
 
 
+# ── migrate (legacy fallback_models → canonical models chains) ──────
+
+def _migrate_across_profiles(paths: Paths,
+                             args: argparse.Namespace) -> int:
+    outcomes = migrate_all(paths, dry_run=args.dry_run)
+    if not outcomes:
+        _report_empty_store(paths)
+        return 1
+    migrated = 0
+    rerendered = False
+    blocked = False
+    for name, result in outcomes:
+        if result.status in (UseStatus.PREVIEW, UseStatus.APPLIED):
+            print(result.message)
+            migrated += 1
+            rerendered = rerendered or result.rerendered
+        elif result.status == UseStatus.NO_MATCHES:
+            print(f"No migration needed for profile '{name}'")
+        elif result.status == UseStatus.FAILED:
+            blocked = True
+            print(f"{name}: {result.message}", file=sys.stderr)
+        else:
+            blocked = True
+            print(f"{name}: INVALID: {result.error}", file=sys.stderr)
+    verb = "Would migrate" if args.dry_run else "Migrated"
+    summary = f"{verb} {migrated}/{len(outcomes)} profile(s)"
+    if rerendered:
+        summary += "; re-rendered active configuration"
+    print(summary)
+    return 1 if blocked else 0
+
+
+def _cmd_migrate(paths: Paths, args: argparse.Namespace) -> int:
+    if args.profile is None:
+        return _migrate_across_profiles(paths, args)
+    result = migrate_profile(paths, args.profile, dry_run=args.dry_run)
+    if result.status in (UseStatus.PREVIEW, UseStatus.APPLIED,
+                         UseStatus.NO_MATCHES):
+        print(result.message)
+        return 0
+    if result.status == UseStatus.BLOCKED:
+        if result.error is not None:
+            print(f"{args.profile}: INVALID: {result.error}",
+                  file=sys.stderr)
+            return 1
+        print(result.message, file=sys.stderr)
+        return 2
+    print(result.message, file=sys.stderr)
+    return 1
+
+
 _HANDLERS = {
     "list": _cmd_list,
     "show": _cmd_show,
@@ -564,6 +625,7 @@ _HANDLERS = {
     "edit": _cmd_edit,
     "import": _cmd_import,
     "replace-model": _cmd_replace_model,
+    "migrate": _cmd_migrate,
 }
 
 

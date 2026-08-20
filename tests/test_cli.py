@@ -24,6 +24,7 @@ from opencode_config_switcher.jsonc import dumps as jsonc_dumps
 from opencode_config_switcher.jsonc import loads as jsonc_loads
 from opencode_config_switcher.omoconfig import OmoDocument
 from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.profiles import drift_status, read_profile
 from opencode_config_switcher.transform import transform_legacy
 from opencode_config_switcher.tui import TuiOutcome, TuiResult
 
@@ -791,7 +792,10 @@ class ImportCurrentTests(unittest.TestCase):
             stored = (home / ".omo" / "profiles" / "current.jsonc").read_text(
                 encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(stored, jsonc_dumps(jsonc_loads(LIVE_TEXT)))
+        # ALPHA_TEXT's leading "// alpha" block survives the force overwrite.
+        self.assertEqual(
+            stored,
+            jsonc_dumps(jsonc_loads(LIVE_TEXT), comments=["// alpha"]))
 
     def test_invalid_live_file_exits_2(self):
         with _home_with(omo_text=BROKEN_TEXT) as home:
@@ -964,9 +968,11 @@ class ImportBatchTests(unittest.TestCase):
             bak = (home / ".omo" / "profiles" / "a.jsonc.BAK").read_text(
                 encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        # ALPHA_TEXT's leading "// alpha" block survives the force overwrite.
         self.assertEqual(
             stored,
-            jsonc_dumps(transform_legacy(json.loads(_legacy_json("p/m")))[0]))
+            jsonc_dumps(transform_legacy(json.loads(_legacy_json("p/m")))[0],
+                        comments=["// alpha"]))
         self.assertEqual(bak, ALPHA_TEXT)
 
     def test_warnings_print_after_success_line(self):
@@ -1464,9 +1470,227 @@ class ReplaceModelUsageTests(unittest.TestCase):
         self.assertIn("usage", proc.stderr)
 
 
+# ── migrate (legacy fallback_models → canonical models chains) ──────
+
+MIGRATE_LEGACY_DOC = {
+    "$schema": SCHEMA,
+    "[opencode]": {
+        "agents": {
+            "build": {
+                "model": "old/primary",
+                "fallback_models": [
+                    "old/fb-1",
+                    {"model": "old/fb-2", "reasoning": "high"},
+                ],
+            }
+        },
+        "categories": {"fast": {"model": "old/cp",
+                                "fallback_models": ["old/cf"]}},
+    },
+}
+MIGRATE_LEGACY_TEXT = jsonc_dumps(MIGRATE_LEGACY_DOC)
+MIGRATE_EXPECTED_TEXT = jsonc_dumps({
+    "$schema": SCHEMA,
+    "[opencode]": {
+        "agents": {"build": {
+            "models": ["old/primary", "old/fb-1",
+                       {"model": "old/fb-2", "reasoning": "high"}]}},
+        "categories": {"fast": {"models": ["old/cp", "old/cf"]}},
+    },
+})
+CANONICAL_TEXT = jsonc_dumps({
+    "$schema": SCHEMA,
+    "[opencode]": {
+        "agents": {"build": {"models": ["old/primary", "old/fb-1"]}},
+    },
+})
+
+
+class MigrateProfileTests(unittest.TestCase):
+    def test_dry_run_previews_and_writes_nothing(self):
+        with _home_with({"rich": MIGRATE_LEGACY_TEXT}) as home:
+            profile = home / ".omo" / "profiles" / "rich.jsonc"
+            before_bytes = profile.read_bytes()
+            before_stat = profile.stat()
+            proc = _run_cli(["migrate", "--profile", "rich", "--dry-run"],
+                            home=home)
+            after_bytes = profile.read_bytes()
+            after_stat = profile.stat()
+            live_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(
+            proc.stdout, "Would migrate profile 'rich' (2 route(s))\n")
+        self.assertEqual(after_bytes, before_bytes)
+        self.assertEqual(after_stat.st_mtime_ns, before_stat.st_mtime_ns)
+        self.assertFalse(live_exists)
+
+    def test_apply_converts_with_bak(self):
+        with _home_with({"rich": MIGRATE_LEGACY_TEXT}) as home:
+            profile = home / ".omo" / "profiles" / "rich.jsonc"
+            proc = _run_cli(["migrate", "--profile", "rich"], home=home)
+            profile_text = profile.read_text(encoding="utf-8")
+            bak_text = (home / ".omo" / "profiles" /
+                        "rich.jsonc.BAK").read_text(encoding="utf-8")
+            live_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout,
+                         "Migrated profile 'rich' (2 route(s))\n")
+        self.assertEqual(profile_text, MIGRATE_EXPECTED_TEXT)
+        self.assertEqual(bak_text, MIGRATE_LEGACY_TEXT)
+        self.assertFalse(live_exists)
+
+    def test_apply_on_active_profile_re_renders_omo_jsonc(self):
+        with _home_with({"rich": MIGRATE_LEGACY_TEXT}) as home:
+            paths = Paths.build(home)
+            use_profile(paths, "rich")
+            proc = _run_cli(["migrate", "--profile", "rich"], home=home)
+            omo_text = paths.omo_path.read_text(encoding="utf-8")
+            drift = drift_status(paths, read_profile(paths, "rich"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Migrated profile 'rich' (2 route(s))"
+            "; re-rendered active configuration\n")
+        self.assertNotIn("fallback_models", omo_text)
+        self.assertIn('"models"', omo_text)
+        self.assertEqual(drift, "managed")
+
+    def test_apply_on_inactive_profile_leaves_omo_jsonc_untouched(self):
+        with _home_with({"rich": MIGRATE_LEGACY_TEXT},
+                        omo_text=LIVE_TEXT) as home:
+            live_before = (home / ".omo" / "omo.jsonc").read_bytes()
+            proc = _run_cli(["migrate", "--profile", "rich"], home=home)
+            live_after = (home / ".omo" / "omo.jsonc").read_bytes()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout,
+                         "Migrated profile 'rich' (2 route(s))\n")
+        self.assertEqual(live_after, live_before)
+
+    def test_canonical_profile_no_migration_needed(self):
+        with _home_with({"canon": CANONICAL_TEXT}) as home:
+            profile = home / ".omo" / "profiles" / "canon.jsonc"
+            before_bytes = profile.read_bytes()
+            before_stat = profile.stat()
+            proc = _run_cli(["migrate", "--profile", "canon"], home=home)
+            after_bytes = profile.read_bytes()
+            after_stat = profile.stat()
+            bak_exists = (home / ".omo" / "profiles" /
+                          "canon.jsonc.BAK").exists()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(
+            proc.stdout, "No migration needed for profile 'canon'\n")
+        self.assertEqual(after_bytes, before_bytes)
+        self.assertEqual(after_stat.st_mtime_ns, before_stat.st_mtime_ns)
+        self.assertFalse(bak_exists)
+
+    def test_missing_profile_exits_2(self):
+        with _home_with() as home:
+            proc = _run_cli(["migrate", "--profile", "nope"], home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "Profile 'nope' not found\n")
+        self.assertEqual(proc.stdout, "")
+
+    def test_invalid_profile_prints_invalid_line_exits_1(self):
+        with _home_with({"broken": BROKEN_TEXT}) as home:
+            proc = _run_cli(["migrate", "--profile", "broken"], home=home)
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(proc.stderr.startswith("broken: INVALID: "),
+                        proc.stderr)
+        self.assertIn("Invalid JSONC at line", proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+
+class MigrateAllTests(unittest.TestCase):
+    STORE = {"beta": CANONICAL_TEXT, "broken": BROKEN_TEXT,
+             "rich": MIGRATE_LEGACY_TEXT}
+
+    def test_apply_all_migrates_others_and_reports_invalid(self):
+        with _home_with(dict(self.STORE)) as home:
+            proc = _run_cli(["migrate"], home=home)
+            rich_text = (home / ".omo" / "profiles" / "rich.jsonc").read_text(
+                encoding="utf-8")
+            beta_text = (home / ".omo" / "profiles" / "beta.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(
+            proc.stdout,
+            "No migration needed for profile 'beta'\n"
+            "Migrated profile 'rich' (2 route(s))\n"
+            "Migrated 1/3 profile(s)\n")
+        self.assertEqual(proc.stderr.count("\n"), 1)
+        self.assertTrue(proc.stderr.startswith("broken: INVALID: "),
+                        proc.stderr)
+        self.assertEqual(rich_text, MIGRATE_EXPECTED_TEXT)
+        self.assertEqual(beta_text, CANONICAL_TEXT)
+
+    def test_apply_all_active_profile_summary_suffix(self):
+        with _home_with(dict(self.STORE)) as home:
+            paths = Paths.build(home)
+            use_profile(paths, "rich")
+            proc = _run_cli(["migrate"], home=home)
+            drift = drift_status(paths, read_profile(paths, "rich"))
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(
+            proc.stdout,
+            "No migration needed for profile 'beta'\n"
+            "Migrated profile 'rich' (2 route(s))"
+            "; re-rendered active configuration\n"
+            "Migrated 1/3 profile(s)"
+            "; re-rendered active configuration\n")
+        self.assertEqual(drift, "managed")
+
+    def test_dry_run_all_summarizes_without_writes(self):
+        with _home_with(dict(self.STORE)) as home:
+            rich = home / ".omo" / "profiles" / "rich.jsonc"
+            before = rich.read_bytes()
+            proc = _run_cli(["migrate", "--dry-run"], home=home)
+            after = rich.read_bytes()
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(
+            proc.stdout,
+            "No migration needed for profile 'beta'\n"
+            "Would migrate profile 'rich' (2 route(s))\n"
+            "Would migrate 1/3 profile(s)\n")
+        self.assertEqual(proc.stderr.count("\n"), 1)
+        self.assertTrue(proc.stderr.startswith("broken: INVALID: "),
+                        proc.stderr)
+        self.assertEqual(after, before)
+
+    def test_all_canonical_store_exits_0(self):
+        with _home_with({"canon": CANONICAL_TEXT}) as home:
+            proc = _run_cli(["migrate"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "No migration needed for profile 'canon'\n"
+            "Migrated 0/1 profile(s)\n")
+
+    def test_all_empty_store_exits_1(self):
+        with _home_with() as home:
+            proc = _run_cli(["migrate"], home=home)
+            profiles_dir = home / ".omo" / "profiles"
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(
+            proc.stderr,
+            f"No profiles found in {profiles_dir}\n{HINT}\n")
+
+
+class MigrateUsageTests(unittest.TestCase):
+    def test_help_lists_flags(self):
+        with _home_with() as home:
+            proc = _run_cli(["migrate", "--help"], home=home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("usage", proc.stdout)
+        self.assertIn("--profile", proc.stdout)
+        self.assertIn("--dry-run", proc.stdout)
+
+
 class HelpFinalizationTests(unittest.TestCase):
     COMMANDS = ["list", "show", "active", "use", "select",
-                "create", "delete", "import", "replace-model"]
+                "create", "delete", "import", "replace-model", "migrate"]
 
     def test_every_subcommand_help_exits_0(self):
         with _home_with() as home:

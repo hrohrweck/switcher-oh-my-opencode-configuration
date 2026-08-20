@@ -10,8 +10,10 @@ Binding contract (Task 9 CLI import + Task 17 onboarding consume these):
 - Pipeline order: strip_metadata → rename_agents → bump_model_versions
   (agents+categories, route-level ``model`` only) → rename_keys →
   remap_disabled → restructure categories (model+fallback_models → models) →
+  restructure agents (fallback_models → canonical models chains) →
   normalize_model_entry on every dict model-ref → wrap
-  ``{"$schema": OMO_SCHEMA_URL, "[opencode]": ...}``.
+  ``{"$schema": OMO_SCHEMA_URL, "[opencode]": ...}``.  No ``agents`` block
+  in the output ever carries ``fallback_models``.
 - All functions are pure (``discover_legacy``/``derive_profile_name`` do path
   math only); input dicts are never mutated.
 """
@@ -61,6 +63,22 @@ class TransformLegacyGroundTruth(unittest.TestCase):
         self.assertEqual(document["$schema"], OMO_SCHEMA_URL)
         self.assertEqual(list(document), ["$schema", "[opencode]"])
         self.assertNotIn("_migrations", document)
+
+    def test_output_agents_blocks_carry_zero_fallback_models(self):
+        legacy = _load("groundtruth_legacy.json")
+        self.assertEqual(len(legacy["agents"]), 11)
+        document, _ = transform_legacy(legacy)
+        for harness, block in document.items():
+            if not (harness.startswith("[") and harness.endswith("]")):
+                continue
+            if not isinstance(block, dict):
+                continue
+            agents = block.get("agents")
+            if not isinstance(agents, dict):
+                continue
+            for name, agent in agents.items():
+                with self.subTest(harness=harness, agent=name):
+                    self.assertNotIn("fallback_models", agent)
 
     def test_legacy_fixture_is_legacy_shaped_and_sanitized(self):
         legacy = _load("groundtruth_legacy.json")
@@ -503,13 +521,13 @@ class TransformLegacyPipeline(unittest.TestCase):
         document, _ = transform_legacy(legacy)
         block = document["[opencode]"]
         self.assertEqual(
-            block["agents"]["sisyphus"]["model"],
-            "anthropic/claude-opus-4-8")
-        # fallback entries are NOT bumped, and the bumped category primary
-        # flows into models[0]
+            block["agents"]["sisyphus"]["models"][0],
+            "anthropic/claude-opus-4-8",
+        )
+        # fallback entries are NOT bumped
         self.assertEqual(
-            block["agents"]["sisyphus"]["fallback_models"],
-            ["anthropic/claude-opus-4-4"],
+            block["agents"]["sisyphus"]["models"][1],
+            "anthropic/claude-opus-4-4",
         )
         self.assertEqual(
             block["categories"]["quick"]["models"],
@@ -569,8 +587,8 @@ class TransformLegacyPipeline(unittest.TestCase):
         }
         document, _ = transform_legacy(legacy)
         self.assertEqual(
-            document["[opencode]"]["agents"]["sisyphus"]["fallback_models"],
-            ["f1", {"model": "f2", "reasoning": "max"}],
+            document["[opencode]"]["agents"]["sisyphus"]["models"],
+            ["m", "f1", {"model": "f2", "reasoning": "max"}],
         )
 
     def test_fallback_dict_without_model_key_untouched_no_crash(self):
@@ -581,13 +599,14 @@ class TransformLegacyPipeline(unittest.TestCase):
             }},
         }
         document, warn = transform_legacy(legacy)
+        # Dicts without model keys pass through to models list unchanged
         self.assertEqual(
-            document["[opencode]"]["agents"]["sisyphus"]["fallback_models"],
-            [{"note": "not a model ref"}],
+            document["[opencode]"]["agents"]["sisyphus"]["models"],
+            ["m", {"note": "not a model ref"}],
         )
         self.assertEqual(warn, ())
 
-    def test_conflict_warning_path_pinned_at_pipeline_level(self):
+    def test_conflict_warning_inside_agent_chain_is_suppressed(self):
         legacy = {
             "agents": {"sisyphus": {
                 "model": "m",
@@ -596,12 +615,12 @@ class TransformLegacyPipeline(unittest.TestCase):
                 ],
             }},
         }
-        _, warn = transform_legacy(legacy)
+        document, warn = transform_legacy(legacy)
         self.assertEqual(
-            warn,
-            ("conflict: agents.sisyphus.fallback_models.0 dropped "
-             "variant='max' kept reasoning='high'",),
+            document["[opencode]"]["agents"]["sisyphus"],
+            {"models": ["m", {"model": "f", "reasoning": "high"}]},
         )
+        self.assertEqual(warn, ())
 
     def test_purity_legacy_document_not_mutated(self):
         legacy = _load("groundtruth_legacy.json")
