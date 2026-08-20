@@ -52,14 +52,14 @@ class InstallationTests(unittest.TestCase):
             result = subprocess.run(
                 [cmd, "--version"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(result.stdout.strip(), "2.0.0")
+            self.assertEqual(result.stdout.strip(), "3.0.0")
 
         # Test module entry
         result = subprocess.run(
             [py, "-m", "opencode_config_switcher", "--version"],
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "2.0.0")
+        self.assertEqual(result.stdout.strip(), "3.0.0")
 
         # Verify installed metadata via importlib.metadata
         import subprocess as _sp
@@ -72,7 +72,7 @@ class InstallationTests(unittest.TestCase):
              "print(f'Requires-Python: {d[\"Requires-Python\"]}')"],
             capture_output=True, text=True, env=env)
         self.assertIn("Name: opencode-config-switcher", result.stdout)
-        self.assertIn("Version: 2.0.0", result.stdout)
+        self.assertIn("Version: 3.0.0", result.stdout)
         self.assertIn("Requires-Python: >=3.11", result.stdout)
         self.assertEqual(result.returncode, 0)
 

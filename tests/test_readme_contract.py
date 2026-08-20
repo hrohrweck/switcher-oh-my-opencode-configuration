@@ -1,4 +1,4 @@
-"""Contract tests for README documentation accuracy."""
+"""Contract tests for README documentation accuracy (v3.0.0)."""
 
 import re
 import unittest
@@ -11,10 +11,10 @@ RAW = README.read_text()
 
 class ReadmeContractTests(unittest.TestCase):
 
-    # ── required content ───────────────────────────────────────────
+    # -- required content -------------------------------------------
 
-    def test_version_2_0_0(self):
-        self.assertIn("2.0.0", RAW)
+    def test_version_3_0_0(self):
+        self.assertIn("3.0.0", RAW)
 
     def test_python_311_plus(self):
         self.assertIn("Python 3.11+", RAW)
@@ -22,6 +22,9 @@ class ReadmeContractTests(unittest.TestCase):
 
     def test_canonical_command(self):
         self.assertIn("opencode-config-switcher", RAW)
+
+    def test_switch_omo_config_alias(self):
+        self.assertIn("switch-omo-config", RAW)
 
     def test_legacy_alias(self):
         self.assertIn("switch_oh-my-opencode_config.py", RAW)
@@ -35,15 +38,30 @@ class ReadmeContractTests(unittest.TestCase):
     def test_uninstall(self):
         self.assertIn("uninstall", RAW.lower())
 
-    def test_wide_keys(self):
-        self.assertIn("PageUp", RAW)
-        self.assertIn("PageDown", RAW)
+    # -- v3 subcommand surface --------------------------------------
 
-    def test_narrow_tab(self):
-        self.assertIn("Tab", RAW)
+    def test_all_subcommands_documented(self):
+        for command in ("list", "show", "active", "use", "select",
+                        "create", "edit", "delete", "import",
+                        "replace-model"):
+            self.assertIn(f"opencode-config-switcher {command}", RAW)
 
-    def test_overlay(self):
-        self.assertIn("Overlay", RAW)
+    def test_v3_contract_strings(self):
+        self.assertIn("Profile applied:", RAW)
+        self.assertIn("Backup saved to:", RAW)
+        self.assertIn("ACTIVE", RAW)
+        self.assertIn("CUSTOM", RAW)
+        self.assertIn("~/.omo/profiles", RAW)
+        self.assertIn("omo.jsonc", RAW)
+        self.assertIn("Editor requires a TTY", RAW)
+        self.assertIn("Exiting without changes", RAW)
+        self.assertIn("INVALID", RAW)
+
+    def test_onboarding_documented(self):
+        self.assertIn("Onboarding", RAW)
+
+    def test_import_all_legacy_documented(self):
+        self.assertIn("import --all-legacy", RAW)
 
     def test_plain_exit_codes(self):
         self.assertIn("exit 0", RAW)
@@ -51,6 +69,9 @@ class ReadmeContractTests(unittest.TestCase):
 
     def test_migration_notes(self):
         self.assertIn("Migration", RAW)
+
+    def test_version_history_preserves_v2(self):
+        self.assertIn("v2.0.0", RAW)
 
     def test_no_break_system_packages(self):
         self.assertNotIn("break-system-packages", RAW)
@@ -61,7 +82,17 @@ class ReadmeContractTests(unittest.TestCase):
         self.assertNotIn("Windows", req_section.replace(
             "Windows is unsupported", ""))
 
-    # ── prohibited content ─────────────────────────────────────────
+    # -- TUI key tables ----------------------------------------------
+
+    def test_selector_keys(self):
+        for key_doc in ("Up / Down", "Tab", "PageUp", "PageDown"):
+            self.assertIn(key_doc, RAW)
+
+    def test_selector_action_keys(self):
+        for key_doc in ("`n`", "`D`", "`e`", "`i`", "`r`"):
+            self.assertIn(key_doc, RAW)
+
+    # -- prohibited content ------------------------------------------
 
     def test_no_python_36(self):
         self.assertNotIn("Python 3.6", RAW)
@@ -70,17 +101,24 @@ class ReadmeContractTests(unittest.TestCase):
         self.assertNotIn("cp switch_oh-my-opencode_config.py", RAW)
         self.assertNotIn("copy the script to", RAW.lower())
 
-    def test_no_space_to_apply(self):
-        tui_section = RAW.split("### TUI Mode")[1] if "### TUI Mode" in RAW else ""
-        self.assertNotIn("Space", tui_section.split("Space does nothing")[0])
+    def test_no_v2_current_badge(self):
+        self.assertNotIn("CURRENT", RAW)
+
+    def test_no_v2_apply_message(self):
+        self.assertNotIn("Configuration applied:", RAW)
+
+    def test_no_switching_py_outside_migration(self):
+        """switching.py may only be mentioned inside the Migration section."""
+        pre_migration = RAW.split("## Migration")[0]
+        self.assertNotIn("switching.py", pre_migration)
+
+    def test_no_2_0_0_as_current(self):
+        self.assertNotIn("v2.0.0 (Current)", RAW)
 
     def test_no_schema_validation_claim(self):
         self.assertNotIn("JSON Schema", RAW)
 
-    def test_no_1_2_0_as_current(self):
-        self.assertNotIn("v1.2.0 (Current)", RAW)
-
-    # ── fenced command allowlist ────────────────────────────────────
+    # -- fenced command allowlist ------------------------------------
 
     def test_fenced_commands_match_allowlist(self):
         """Every fenced bash block must be in the approved set."""
@@ -89,11 +127,18 @@ class ReadmeContractTests(unittest.TestCase):
             "pipx install .",
             "python3.11 -m pip install --user .",
             "opencode-config-switcher --version",
-            "switch_oh-my-opencode_config.py --version",
-            "python3.11 -m opencode_config_switcher --version",
             "python3.11 -m pip uninstall opencode-config-switcher",
-            "python3.11 -m unittest discover -s tests -v",
-            "PYTHONPATH=src python3.11 -m unittest tests.test_tui_pty -v",
+            "opencode-config-switcher list",
+            "opencode-config-switcher show default",
+            "opencode-config-switcher active",
+            "opencode-config-switcher use work",
+            "opencode-config-switcher create scratch --from work",
+            "opencode-config-switcher edit work",
+            "opencode-config-switcher delete scratch --yes",
+            "opencode-config-switcher import --all-legacy",
+            "opencode-config-switcher replace-model "
+            "acme/old-model acme/new-model --all --dry-run",
+            "PYTHONPATH=src python3.11 -m unittest discover -s tests -v",
             "bash -n setup.sh",
         }
 
@@ -110,13 +155,6 @@ class ReadmeContractTests(unittest.TestCase):
         self.assertEqual(
             [], violations,
             f"Fenced commands outside allowlist: {violations}")
-
-    def test_keys_and_contract_strings(self):
-        self.assertIn("Exiting without changes", RAW)
-        self.assertIn("Backup saved to:", RAW)
-        self.assertIn("Configuration applied:", RAW)
-        self.assertIn("INVALID", RAW)
-        self.assertIn("CURRENT", RAW)
 
     def test_migration_and_failure_contract(self):
         self.assertIn("externally-managed-environment", RAW)

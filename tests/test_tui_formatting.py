@@ -1,13 +1,14 @@
-"""Tests for pure TUI formatting and display-width helpers."""
+"""Tests for pure TUI formatting: display-width helpers (byte-identical
+v2 contracts, imported by tui_data) and the v3 footer/prompt composers.
+"""
 
 import unittest
-from pathlib import Path
+from unittest import mock
 
-from opencode_config_switcher.config import (
-    ConfigSummary, FileSummary, ModelSpec, RouteSummary,
-    RuntimeFallbackSummary)
+import opencode_config_switcher.tui as tui_mod
 from opencode_config_switcher.tui import (
-    display_width, truncate_display, format_details, format_overlay,
+    AppState, LayoutMode, NarrowPane, CREATE_PROMPT_LABEL,
+    compose_footer, delete_prompt_label, display_width, truncate_display,
     )
 
 
@@ -54,132 +55,98 @@ class TruncateDisplayTests(unittest.TestCase):
         self.assertEqual(truncate_display("abc", 0), "")
 
 
-class FormatDetailsTests(unittest.TestCase):
-    def _summary(self, **kw):
-        defaults = dict(
-            file=FileSummary(
-                path=Path("/tmp/test.json"),
-                name="test.json",
-                size_bytes=100,
-                modified_ns=123456789,
-                is_current=False,
-                raw_text='{"key":"val"}'),
-            is_valid=True,
-            model_fallback=True,
-            runtime_fallback=RuntimeFallbackSummary(enabled=True),
-            agents=(),
-            categories=(),
-        )
-        defaults.update(kw)
-        return ConfigSummary(**defaults)
+class PromptLabelTests(unittest.TestCase):
+    def test_create_prompt_label_pinned(self):
+        self.assertEqual(CREATE_PROMPT_LABEL, "New profile name: ")
 
-    def test_basic_file_info(self):
-        lines = format_details(self._summary(), 60)
-        text = "\n".join(lines)
-        self.assertIn("File:", text)
-        self.assertIn("test.json", text)
-        self.assertIn("VALID", text)
-
-    def test_current_indicator(self):
-        s = self._summary(file=FileSummary(
-            path=Path("/tmp/active.json"),
-            name="active.json",
-            size_bytes=50,
-            modified_ns=1,
-            is_current=True,
-            raw_text="{}"))
-        lines = format_details(s, 60)
-        self.assertIn("CURRENT VALID", "\n".join(lines))
-
-    def test_invalid_indicator(self):
-        s = self._summary(is_valid=False, error="trailing comma")
-        lines = format_details(s, 60)
-        self.assertIn("INVALID", "\n".join(lines))
-        self.assertIn("trailing comma", "\n".join(lines))
-
-    def test_agents_section(self):
-        s = self._summary(agents=(
-            RouteSummary("sisyphus",
-                         ModelSpec(model="gpt-5", variant="max"),
-                         (ModelSpec(model="k3"),), ()),
-            RouteSummary("oracle",
-                         ModelSpec(model="gpt-5.6", variant="xhigh"),
-                         (ModelSpec(model="k3"),), ()),
-        ))
-        lines = format_details(s, 60)
-        text = "\n".join(lines)
-        self.assertIn("Agents (2)", text)
-        self.assertIn("sisyphus", text)
-        self.assertIn("gpt-5 [max]", text)
-        self.assertIn("gpt-5.6 [xhigh]", text)
-        self.assertIn("[1] k3", text)
-
-    def test_categories_section(self):
-        s = self._summary(categories=(
-            RouteSummary("quick",
-                         ModelSpec(model="gpt-4o-mini"),
-                         (), ()),
-        ))
-        lines = format_details(s, 60)
-        text = "\n".join(lines)
-        self.assertIn("Categories (1)", text)
-        self.assertIn("quick", text)
-
-    def test_empty_agents_categories(self):
-        lines = format_details(self._summary(), 60)
-        text = "\n".join(lines)
-        self.assertIn("none configured", text)
-
-    def test_warnings_appear(self):
-        s = self._summary(
-            agents=(
-                RouteSummary("x",
-                             ModelSpec(model="m"),
-                             (ModelSpec(model="ok"),),
-                             ("fallback[0]: bad entry",)),),
-            warnings=("Top-level warning",))
-        lines = format_details(s, 60)
-        text = "\n".join(lines)
-        self.assertIn("bad entry", text)
-        self.assertIn("Top-level warning", text)
-
-    def test_missing_model_label(self):
-        s = self._summary(agents=(
-            RouteSummary("x", ModelSpec(model=None), (), ()),))
-        lines = format_details(s, 60)
-        text = "\n".join(lines)
-        self.assertIn("not configured", text)
-
-    def test_reasoning_effort(self):
-        s = self._summary(agents=(
-            RouteSummary("librarian",
-                         ModelSpec(model="gpt4",
-                                   reasoning_effort="high"),
-                         (), ()),))
-        lines = format_details(s, 60)
-        text = "\n".join(lines)
-        self.assertIn("gpt4 (effort: high)", text)
-
-    def test_truncation(self):
-        s = self._summary(agents=(
-            RouteSummary("very-long-agent-name-that-exceeds-width",
-                         ModelSpec(model="gpt-5"), (), ()),))
-        lines = format_details(s, 20)
-        for line in lines:
-            self.assertLessEqual(display_width(line), 20)
+    def test_delete_prompt_label_exact(self):
+        self.assertEqual(delete_prompt_label("alpha"),
+                         "Delete profile 'alpha'? [y/N]: ")
 
 
-class FormatOverlayTests(unittest.TestCase):
-    def test_overlay_lines(self):
-        raw = '{"key": "val"}\n{"key2": 42}\n'
-        lines = format_overlay(raw, 30)
-        self.assertEqual(len(lines), 2)
-        self.assertIn("key", lines[0])
+class ComposeFooterTests(unittest.TestCase):
+    """Footer text per layout/pane, status prefix, and prompt capture."""
 
-    def test_overlay_truncation(self):
-        raw = 'x' * 100
-        lines = format_overlay(raw, 20)
-        self.assertLessEqual(display_width(lines[0]), 20)
+    def _state(self, **kw):
+        base = dict(layout=LayoutMode.WIDE, narrow_pane=NarrowPane.MENU)
+        base.update(kw)
+        return AppState(config_count=3, **base)
+
+    def test_wide_footer_actions(self):
+        footer = compose_footer(self._state())
+        self.assertIn("Enter: use", footer)
+        self.assertIn("n: new", footer)
+        self.assertIn("D: delete", footer)
+        self.assertIn("d: raw", footer)
+        self.assertIn("q: quit", footer)
+
+    def test_narrow_menu_footer(self):
+        footer = compose_footer(self._state(layout=LayoutMode.NARROW))
+        self.assertIn("Tab: Details", footer)
+        self.assertIn("n: new", footer)
+        self.assertIn("Enter: use", footer)
+
+    def test_narrow_details_footer(self):
+        footer = compose_footer(
+            self._state(layout=LayoutMode.NARROW,
+                        narrow_pane=NarrowPane.DETAILS))
+        self.assertIn("Tab: Menu", footer)
+        self.assertIn("PgUp/PgDn", footer)
+        self.assertIn("d: raw", footer)
+
+    def test_too_small_footer(self):
+        footer = compose_footer(self._state(layout=LayoutMode.TOO_SMALL))
+        self.assertEqual(footer, "q/Ctrl-C quit")
+
+    def test_editor_keys_hidden_while_unavailable(self):
+        with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", False):
+            for state in (self._state(),
+                          self._state(layout=LayoutMode.NARROW),
+                          self._state(layout=LayoutMode.NARROW,
+                                      narrow_pane=NarrowPane.DETAILS)):
+                footer = compose_footer(state)
+                self.assertNotIn("e: edit", footer)
+                self.assertNotIn("i: import", footer)
+                self.assertNotIn("r: replace", footer)
+
+    def test_editor_keys_advertised_when_available(self):
+        with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", True):
+            footer = compose_footer(self._state())
+            self.assertIn("e: edit", footer)
+            self.assertIn("i: import", footer)
+            self.assertIn("r: replace", footer)
+
+    def test_status_prefixes_mode_footer(self):
+        state = self._state(status="Profile created: gamma")
+        footer = compose_footer(state)
+        self.assertTrue(footer.startswith("Profile created: gamma  |  "))
+        self.assertIn("Enter: use", footer)
+
+    def test_create_prompt_captures_footer(self):
+        state = self._state(prompt="create",
+                            prompt_label=CREATE_PROMPT_LABEL,
+                            prompt_buffer="ga")
+        self.assertEqual(compose_footer(state), "New profile name: ga")
+
+    def test_delete_prompt_captures_footer(self):
+        state = self._state(
+            prompt="delete",
+            prompt_label=delete_prompt_label("alpha"),
+            prompt_buffer="y")
+        self.assertEqual(compose_footer(state),
+                         "Delete profile 'alpha'? [y/N]: y")
+
+    def test_prompt_hides_status(self):
+        state = self._state(status="earlier message", prompt="create",
+                            prompt_label=CREATE_PROMPT_LABEL,
+                            prompt_buffer="")
+        self.assertEqual(compose_footer(state),
+                         CREATE_PROMPT_LABEL)
+
+    def test_empty_prompt_buffer_shows_bare_label(self):
+        state = self._state(prompt="create",
+                            prompt_label=CREATE_PROMPT_LABEL)
+        self.assertEqual(compose_footer(state), "New profile name: ")
 
 
 if __name__ == "__main__":

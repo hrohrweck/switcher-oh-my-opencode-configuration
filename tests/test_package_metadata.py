@@ -17,10 +17,10 @@ class PackageMetadataTests(unittest.TestCase):
     # ── version ────────────────────────────────────────────────────────
 
     def test_version_single_source(self):
-        """Version 2.0.0 lives only in opencode_config_switcher.__init__."""
+        """Version 3.0.0 lives only in opencode_config_switcher.__init__."""
         import opencode_config_switcher as pkg
 
-        self.assertEqual(pkg.__version__, "2.0.0")
+        self.assertEqual(pkg.__version__, "3.0.0")
 
     def test_version_not_duplicated(self):
         """pyproject.toml has no static version field."""

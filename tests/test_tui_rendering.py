@@ -1,7 +1,9 @@
-"""Fake-window rendering tests for the curses TUI renderer.
+"""Fake-window rendering tests for the v3 curses profile selector.
 
-Verifies WIDE/NARROW/TOO_SMALL frames, colors, badges,
-Details content, overlay, and safe clipping without a real terminal.
+Verifies WIDE/NARROW/TOO_SMALL frames, badge colors (ACTIVE green,
+CUSTOM yellow, INVALID red+bold, selection A_REVERSE), details/overlay
+content, safe clipping, and the EDITOR_AVAILABLE=False footer — all
+against a mocked curses window (no real terminal).
 """
 
 import curses
@@ -9,29 +11,32 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from opencode_config_switcher.config import (
-    ConfigSummary, FileSummary, ModelSpec, RouteSummary,
-    RuntimeFallbackSummary)
-from opencode_config_switcher.switching import ApplyResult, ApplyStatus
+from opencode_config_switcher.omoconfig import OmoDocument
+from opencode_config_switcher.profiles import ProfileRecord
 from opencode_config_switcher.tui import (
-    TuiOutcome, TuiResult, run_tui, AppState, LayoutMode,
-    _safe_addstr, _draw_acs_border, _draw_ascii_border,
+    TuiOutcome, _draw_ascii_border, _safe_addstr, run_profile_tui,
     )
+from opencode_config_switcher.tui_data import ProfileSummary
 import opencode_config_switcher.tui as tui_mod
 
+SCHEMA = "https://example.invalid/omo.schema.json"
 
-def _cfg(name: str, *, is_current: bool = False, is_valid: bool = True,
-         agents=(), categories=(), raw_text: str = "{}",
-         error: str | None = None) -> ConfigSummary:
-    return ConfigSummary(
-        file=FileSummary(
-            path=Path(f"/tmp/{name}"), name=name,
-            size_bytes=100, modified_ns=1,
-            is_current=is_current, raw_text=raw_text),
-        is_valid=is_valid, error=error,
-        model_fallback=True,
-        runtime_fallback=RuntimeFallbackSummary(enabled=True),
-        agents=agents, categories=categories,
+
+def _summary(name, *, active=False, drift="unmanaged", invalid=False,
+             agents=(), categories=(), raw_text='{"k": 1}',
+             document="default"):
+    """Hand-build a ProfileSummary; no disk, no I/O."""
+    if document == "default" and not invalid:
+        document = OmoDocument(raw={
+            "$schema": SCHEMA, "[opencode]": {"agents": {}}})
+    return ProfileSummary(
+        record=ProfileRecord(
+            name=name, path=Path(f"/tmp/{name}.jsonc"),
+            document=document, is_valid=not invalid,
+            error="Invalid JSONC at line 3: boom" if invalid else None,
+            size_bytes=100, modified_ns=1, raw_text=raw_text),
+        is_active=active, drift=drift,
+        agents=agents, categories=categories, section_warnings=(),
     )
 
 
@@ -68,12 +73,10 @@ class BorderTests(unittest.TestCase):
         self.assertIn("+", calls[0][2])
 
 
-class FakeControllerTests(unittest.TestCase):
-    """Drive run_tui with a mocked curses environment and assert outcomes."""
+class FakeWindowTestCase(unittest.TestCase):
+    """Mocked curses environment with colors ON (pair n -> attr n)."""
 
     def setUp(self):
-        """Set up all necessary curses mocks."""
-        import opencode_config_switcher.tui as tui_mod
         self._patches = []
         to_mock = [
             "curs_set", "has_colors", "start_color", "use_default_colors",
@@ -84,86 +87,145 @@ class FakeControllerTests(unittest.TestCase):
             m = p.start()
             self._patches.append(p)
             if name == "has_colors":
-                m.return_value = False
+                m.return_value = True
             elif name == "color_pair":
-                m.return_value = 0
-        self.mock_stdscr = mock.MagicMock()
-        self.mock_stdscr.getmaxyx.return_value = (24, 80)
-        self.patch_wrapper = mock.patch.object(
+                m.side_effect = lambda pair: pair  # identity: green=2 …
+        self.stdscr = mock.MagicMock()
+        self.stdscr.getmaxyx.return_value = (40, 120)
+        p = mock.patch.object(
             tui_mod.curses, "wrapper",
-            side_effect=lambda fn: fn(self.mock_stdscr))
-        self.patch_wrapper.start()
-        self._patches.append(self.patch_wrapper)
+            side_effect=lambda fn: fn(self.stdscr))
+        p.start()
+        self._patches.append(p)
         self._patches.append(mock.patch("locale.setlocale").start())
+        self.services = tui_mod.SelectorServices(
+            use_fn=mock.MagicMock(),
+            create_fn=mock.MagicMock(),
+            delete_fn=mock.MagicMock(),
+            refresh_fn=mock.MagicMock(return_value=[]),
+        )
 
     def tearDown(self):
         for p in getattr(self, "_patches", []):
             p.stop()
 
-    def _assert_quit_outcome(self, configs, keys, expected=TuiOutcome.QUIT):
-        self.mock_stdscr.getch.side_effect = list(keys)
-        result = run_tui(configs, mock.MagicMock())
-        self.assertEqual(result.outcome, expected)
+    # ── helpers ────────────────────────────────────────────────────
 
-    def test_quit_with_q(self):
-        self._assert_quit_outcome(
-            [_cfg("a.json")], [ord("q")])
+    def _run(self, summaries, keys):
+        from opencode_config_switcher.paths import Paths
+        self.stdscr.getch.side_effect = list(keys)
+        return run_profile_tui(
+            summaries, Paths.build(Path("/tmp/fake-home")), self.services)
 
-    def test_quit_with_ctrl_d(self):
-        self._assert_quit_outcome(
-            [_cfg("a.json")], [4])  # Ctrl-D
+    def _calls(self):
+        """[(y, x, text, attr)] for every addstr the frame made."""
+        return [c.args for c in self.stdscr.addstr.call_args_list]
 
-    def test_apply_valid(self):
-        cfg = [_cfg("a.json")]
-        apply_fn = mock.MagicMock(return_value=ApplyResult(
-            ApplyStatus.APPLIED, Path("a"), Path("b"), Path("c"), "ok"))
-        # Navigate down (already at 0), press enter
-        self.mock_stdscr.getch.side_effect = [10]  # Enter
-        result = run_tui(cfg, apply_fn)
-        self.assertEqual(result.outcome, TuiOutcome.APPLIED)
+    def _find(self, needle):
+        """All calls whose text contains *needle*."""
+        return [c for c in self._calls() if needle in c[2]]
 
-    def test_blocked_invalid(self):
-        cfg = [_cfg("bad.json", is_valid=False, error="parse error")]
-        apply_fn = mock.MagicMock(return_value=ApplyResult(
-            ApplyStatus.BLOCKED, Path("a"), Path("b"), Path("c"),
-            "blocked", error="parse error"))
-        # Press enter then quit
-        self.mock_stdscr.getch.side_effect = [10, ord("q")]
-        result = run_tui(cfg, apply_fn)
+    def _footer_calls(self):
+        return self._find("q: quit") + self._find("q/Ctrl-C quit")
+
+
+class WideFrameTests(FakeWindowTestCase):
+
+    def test_startup_renders_header_menu_and_details(self):
+        result = self._run(
+            [_summary("alpha", active=True, drift="managed"),
+             _summary("beta")],
+            [ord("q")])
         self.assertEqual(result.outcome, TuiOutcome.QUIT)
-        # Status should have been set (we can't easily read from
-        # inside the mock, but the apply_fn was called once)
-        apply_fn.assert_called_once()
+        self.assertTrue(self._find("OpenCode Configuration Switcher"))
+        self.assertTrue(self._find("alpha"), "menu shows alpha")
+        self.assertTrue(self._find("beta"), "menu shows beta")
+        self.assertTrue(self._find("[ACTIVE]"), "ACTIVE badge rendered")
+        self.assertTrue(self._find("Profile: alpha"),
+                        "details pane shows the selected profile")
+        self.assertTrue(self._find("State: active"))
 
-    def test_noop_current(self):
-        cfg = [_cfg("active.json", is_current=True)]
-        apply_fn = mock.MagicMock(return_value=ApplyResult(
-            ApplyStatus.NOOP, Path("a"), Path("b"), Path("c"), "no change"))
-        self.mock_stdscr.getch.side_effect = [10]
-        result = run_tui(cfg, apply_fn)
-        self.assertEqual(result.outcome, TuiOutcome.NOOP)
+    def test_badge_colors(self):
+        # First row is a plain profile: selection (reverse) stays off the
+        # badge rows under test.
+        self._run(
+            [_summary("plain"),
+             _summary("good", active=True, drift="managed"),
+             _summary("drifted", active=True, drift="drifted"),
+             _summary("bad", invalid=True)],
+            [ord("q")])
+        active = self._find("[ACTIVE]")
+        drifted = self._find("[CUSTOM]")
+        invalid = self._find("[INVALID]")
+        self.assertTrue(active and drifted and invalid)
+        self.assertEqual(active[0][3], 2)  # green pair 2
+        self.assertEqual(drifted[0][3], 4)  # yellow pair 4
+        self.assertEqual(invalid[0][3], 3 | curses.A_BOLD)  # red + bold
 
-    def test_resize_preserves_state(self):
-        cfg = [_cfg("a.json"), _cfg("b.json")]
-        self.mock_stdscr.getch.side_effect = [
-            curses.KEY_RESIZE, ord("q")]
-        result = run_tui(cfg, mock.MagicMock())
+    def test_selected_row_is_reversed_plain_rows_normal(self):
+        self._run([_summary("alpha"), _summary("beta")], [ord("q")])
+        alpha = self._find("alpha")
+        beta = self._find("beta")
+        # Selected (alpha) renders reversed; beta (unselected) normal.
+        self.assertEqual(alpha[0][3], curses.A_REVERSE)
+        self.assertEqual(beta[0][3], 0)
+
+    def test_footer_hides_editor_keys(self):
+        import opencode_config_switcher.tui as tui_mod
+        with mock.patch.object(tui_mod, "EDITOR_AVAILABLE", False):
+            self._run([_summary("alpha")], [ord("q")])
+            footers = self._footer_calls()
+            self.assertTrue(footers, "a footer line was drawn")
+            for _, _, text, _ in footers:
+                self.assertNotIn("e: edit", text)
+                self.assertNotIn("i: import", text)
+                self.assertNotIn("r: replace", text)
+                self.assertIn("q: quit", text)
+
+    def test_overlay_draws_cached_raw_text(self):
+        raw = '{"alpha-raw-marker": true}'
+        result = self._run([_summary("alpha", raw_text=raw)],
+                           [ord("d"), ord("q")])
         self.assertEqual(result.outcome, TuiOutcome.QUIT)
+        self.assertTrue(self._find("alpha-raw-marker"),
+                        "raw overlay content was drawn from raw_text")
 
-    def test_keyboard_interrupt(self):
-        cfg = [_cfg("a.json")]
-        with mock.patch.object(tui_mod.curses, "wrapper",
-                               side_effect=KeyboardInterrupt()):
-            result = run_tui(cfg, mock.MagicMock())
+    def test_resize_during_overlay_keeps_overlay(self):
+        raw = '{"overlay-persist": 1}'
+        self._run([_summary("alpha", raw_text=raw)],
+                  [ord("d"), curses.KEY_RESIZE, ord("q")])
+        # Two redraws after the toggle (overlay frame + post-resize frame).
+        self.assertGreaterEqual(len(self._find("overlay-persist")), 2)
+
+    def test_cjk_profile_name_renders(self):
+        self._run([_summary("配置文件")], [ord("q")])
+        self.assertTrue(self._find("配置文件"), "CJK name rendered")
+        # Everything written stayed inside the window bounds.
+        for _, x, text, _ in self._calls():
+            self.assertLess(x + tui_mod.display_width(text), 120)
+
+    def test_empty_list_renders_sane_frame(self):
+        result = self._run([], [ord("q")])
         self.assertEqual(result.outcome, TuiOutcome.QUIT)
+        self.assertTrue(self._find("OpenCode Configuration Switcher"))
+        self.assertFalse(self._find("[ACTIVE]"))
 
-    def test_fatal_exception(self):
-        cfg = [_cfg("a.json")]
-        with mock.patch.object(tui_mod.curses, "wrapper",
-                               side_effect=RuntimeError("boom")):
-            result = run_tui(cfg, mock.MagicMock())
-        self.assertEqual(result.outcome, TuiOutcome.FATAL)
-        self.assertEqual(result.error_type, "RuntimeError")
+
+class NarrowFrameTests(FakeWindowTestCase):
+
+    def test_narrow_menu_frame(self):
+        self.stdscr.getmaxyx.return_value = (24, 80)
+        self._run([_summary("alpha")],
+                  [ord("\t"), ord("q")])  # Tab to details, quit
+        self.assertTrue(self._find("alpha"))
+        self.assertTrue(self._find("Details"))
+
+    def test_too_small_frame(self):
+        self.stdscr.getmaxyx.return_value = (10, 39)
+        result = self._run([_summary("alpha")], [ord("q")])
+        self.assertEqual(result.outcome, TuiOutcome.QUIT)
+        self.assertTrue(self._find("too small"))
+        self.assertTrue(self._find("q/Ctrl-C quit"))
 
 
 if __name__ == "__main__":

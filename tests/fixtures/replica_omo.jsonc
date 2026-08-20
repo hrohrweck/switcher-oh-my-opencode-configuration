@@ -1,0 +1,78 @@
+// OMO configuration
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json",
+  "[opencode]": {
+    "model_fallback": true,
+    "runtime_fallback": {
+      "enabled": true,
+      "retry_on_errors": [
+        429,
+        503,
+        529
+      ],
+      "max_fallback_attempts": 3,
+      "cooldown_seconds": 60
+    },
+    "agents": {
+      "agent-one": {
+        "model": "provider-a/model-x",
+        "reasoning": "max",
+        "fallback_models": [
+          "provider-b/model-y",
+          "provider-c/model-z"
+        ]
+      },
+      "agent-two": {
+        "model": "provider-a/model-x",
+        "reasoning": "high",
+        "variant": "high",
+        "fallback_models": [
+          {
+            "model": "provider-d/model-w",
+            "reasoning": "xhigh"
+          },
+          {
+            "model": "provider-b/model-y",
+            "reasoning": "max"
+          }
+        ]
+      },
+      "agent-three": {
+        "model": "provider-c/model-z",
+        "fallback_models": [
+          {
+            "model": "provider-e/model-v",
+            "reasoning": "medium"
+          }
+        ]
+      }
+    },
+    "categories": {
+      "category-one": {
+        "models": [
+          "provider-b/model-y",
+          {
+            "model": "provider-a/model-x"
+          },
+          {
+            "model": "provider-f/model-u",
+            "reasoning": "high"
+          }
+        ]
+      },
+      "category-two": {
+        "models": [
+          {
+            "model": "provider-a/model-x",
+            "reasoning": "max"
+          },
+          "provider-c/model-z"
+        ]
+      }
+    }
+  },
+  "_migrations": [
+    "2026-07-opencode-config-unification",
+    "2026-08-reasoning-unification"
+  ]
+}

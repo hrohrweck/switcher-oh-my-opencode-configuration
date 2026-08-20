@@ -1,0 +1,8 @@
+{
+  "url": "https://example.com/path//double//slash",
+  "block_markers": "/* not a comment */",
+  "escaped_quote": "she said \"// still not a comment /*\" done",
+  "backslash_escape": "C:\\path\\to//file",
+  "close_marker": "text with */ inside",
+  "empty": ""
+}
