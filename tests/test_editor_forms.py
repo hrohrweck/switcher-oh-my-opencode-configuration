@@ -572,10 +572,10 @@ class GroundTruthProbeTests(unittest.TestCase):
         doc = EditorDocument(
             "work", json.loads(FIXTURE.read_text()))
         item = next(r for r in doc.routes() if r.name == "metis")
-        derived = copy.deepcopy(chain_entries(item)[1])   # fb[0]
+        derived = copy.deepcopy(chain_entries(item)[1])   # chain[1]
         derived["provider_options"] = {"provider-12": {"bet": ["ctx"]}}
         derived["thinking"] = {"enabled": True, "budget": 32000}
-        item.block["fallback_models"][0] = derived
+        item.block["models"][1] = derived
         return item, derived
 
     def test_cycle_reasoning_changes_only_reasoning(self):

@@ -39,6 +39,8 @@ from opencode_config_switcher.editor import (
     write_chain,
 )
 
+from opencode_config_switcher.transform import transform_legacy
+
 FIXTURE = (Path(__file__).resolve().parent / "fixtures"
            / "groundtruth_migrated.json")
 
@@ -83,19 +85,12 @@ def route(doc, name):
 
 class RoundTripGroundTruthTests(unittest.TestCase):
     def test_round_trip_migrates_legacy_agents_to_canonical_models(self):
-        doc = groundtruth_doc()
-        original = json.loads(FIXTURE.read_text())
+        legacy = json.loads(
+            (FIXTURE.parent / "groundtruth_legacy.json").read_text())
+        doc = EditorDocument("work", transform_legacy(legacy)[0])
         for item in doc.routes():
             write_chain(item, chain_entries(item))
-        expected = copy.deepcopy(original)
-        for block in expected["[opencode]"]["agents"].values():
-            fallbacks = block.pop("fallback_models")
-            primary = block.pop("model")
-            reasoning = block.pop("reasoning", None)
-            entry = {"model": primary, "reasoning": reasoning} \
-                if reasoning is not None else primary
-            block["models"] = [entry, *fallbacks]
-        self.assertEqual(doc.document, expected)
+        self.assertEqual(doc.document, json.loads(FIXTURE.read_text()))
 
     def test_migrated_metis_folds_reasoning_into_entry_zero(self):
         doc = groundtruth_doc()
@@ -136,10 +131,12 @@ class RoundTripGroundTruthTests(unittest.TestCase):
         models = doc.document["[opencode]"]["categories"][
             "visual-engineering"]["models"]
         self.assertIs(chain[1], models[1])
-        junior = doc.document["[opencode]"]["agents"]["sisyphus-junior"]
-        jchain = chain_entries(route(doc, "sisyphus-junior"))
-        self.assertIs(jchain[0], junior["model"])
-        self.assertIs(jchain[1], junior["fallback_models"][0])
+        junior_block = {"model": "m0", "fallback_models": ["m1", "m2"]}
+        doc2 = EditorDocument("x", {"[opencode]": {"agents": {
+            "sisyphus-junior": junior_block}}})
+        jchain = chain_entries(route(doc2, "sisyphus-junior"))
+        self.assertIs(jchain[0], junior_block["model"])
+        self.assertIs(jchain[1], junior_block["fallback_models"][0])
 
     def test_canonical_agent_entries_are_live_references(self):
         doc = groundtruth_doc()
@@ -170,21 +167,16 @@ class RoundTripGroundTruthTests(unittest.TestCase):
 class GroundTruthMutationTests(unittest.TestCase):
     def test_move_fallback1_up_on_metis_changes_only_that_order(self):
         """QA scenario: one intended order change, everything else
-        deep-equal (the expected document restates the migration:
-        primary folded with def-level reasoning, fallbacks swapped)."""
+        deep-equal (one canonical chain entry moved, nothing else)."""
         doc = groundtruth_doc()
         original = json.loads(FIXTURE.read_text())
-        item = route(doc, "metis")   # model + 3 reasoning fallbacks
+        item = route(doc, "metis")   # 4 reasoning-bearing chain entries
         chain = chain_entries(item)
-        chain.insert(1, chain.pop(2))   # fallback[1] up
+        chain.insert(1, chain.pop(2))   # entry[2] up
         write_chain(item, chain)
         expected = copy.deepcopy(original)
-        metis = expected["[opencode]"]["agents"]["metis"]
-        fallbacks = metis.pop("fallback_models")
-        metis["models"] = [
-            {"model": metis.pop("model"),
-             "reasoning": metis.pop("reasoning")},
-            fallbacks[1], fallbacks[0], fallbacks[2]]
+        models = expected["[opencode]"]["agents"]["metis"]["models"]
+        models[1], models[2] = models[2], models[1]
         self.assertEqual(doc.document, expected)
         self.assertEqual(route_entry_count(item), 4)
 
