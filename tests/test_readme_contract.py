@@ -1,4 +1,4 @@
-"""Contract tests for README documentation accuracy (v3.0.0)."""
+"""Contract tests for README documentation accuracy (v3.1.0)."""
 
 import re
 import unittest
@@ -13,8 +13,8 @@ class ReadmeContractTests(unittest.TestCase):
 
     # -- required content -------------------------------------------
 
-    def test_version_3_0_0(self):
-        self.assertIn("3.0.0", RAW)
+    def test_version_3_1_0(self):
+        self.assertIn("3.1.0", RAW)
 
     def test_python_311_plus(self):
         self.assertIn("Python 3.11+", RAW)
@@ -43,7 +43,7 @@ class ReadmeContractTests(unittest.TestCase):
     def test_all_subcommands_documented(self):
         for command in ("list", "show", "active", "use", "select",
                         "create", "edit", "delete", "import",
-                        "replace-model"):
+                        "replace-model", "migrate"):
             self.assertIn(f"opencode-config-switcher {command}", RAW)
 
     def test_v3_contract_strings(self):
@@ -138,6 +138,8 @@ class ReadmeContractTests(unittest.TestCase):
             "opencode-config-switcher import --all-legacy",
             "opencode-config-switcher replace-model "
             "acme/old-model acme/new-model --all --dry-run",
+            "opencode-config-switcher migrate",
+            "opencode-config-switcher migrate --profile work --dry-run",
             "PYTHONPATH=src python3.11 -m unittest discover -s tests -v",
             "bash -n setup.sh",
         }

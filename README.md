@@ -1,4 +1,4 @@
-# OpenCode Configuration Switcher v3.0.0 — Profile-Based omo.jsonc Switcher
+# OpenCode Configuration Switcher v3.1.0 — Profile-Based omo.jsonc Switcher
 
 A command-line toolkit that manages named configuration profiles under `~/.omo/profiles/` and renders the selected profile into `~/.omo/omo.jsonc`, the configuration read by oh-my-opencode / oh-my-openagent. Switching is render-on-select: profiles are stored documents, the live file is generated from them, and nothing in your legacy `~/.config/opencode/` directory is ever modified.
 
@@ -10,6 +10,7 @@ A command-line toolkit that manages named configuration profiles under `~/.omo/p
 - **Active Marker and Drift Detection**: `~/.omo/profiles/.active` records the applied profile; the tool reports whether the live file still matches it (ACTIVE) or has drifted (CUSTOM)
 - **Full-Screen TUI**: A curses profile selector plus a structured profile editor with model-entry and settings forms
 - **Model Replacement**: Find-and-replace a model ID in one profile or across every stored profile, with dry-run previews
+- **Canonical `models` Chains and `migrate`**: Agent fallback routes are stored as canonical `models` chains matching oh-my-openagent's format; the `migrate` subcommand converts pre-3.1 stores
 - **Legacy Import**: Onboarding and `import` subcommand bring v2-era configuration files in as profiles
 - **Plain Mode**: Non-TTY/piped execution uses a one-shot numbered selector with documented exit codes
 
@@ -155,6 +156,21 @@ An apply reports `Replaced <n> model reference(s) in profile '<name>'` (with `; 
 opencode-config-switcher replace-model acme/old-model acme/new-model --all --dry-run
 ```
 
+### `migrate`: convert stored profiles to the canonical models format
+
+Rewrites legacy `fallback_models` routes into canonical `models` chains in stored profiles. Called bare, it migrates every stored profile; `--profile NAME` targets a single one. `--dry-run` previews each conversion without writing:
+
+    Would migrate profile 'work' (3 route(s))
+
+An apply reports `Migrated profile '<name>' (<n> route(s))`. Profiles already in canonical form are never rewritten (no `.BAK`, no reformatting) and report `No migration needed for profile '<name>'`. Every actual write backs up the previous bytes to `<name>.jsonc.BAK` and preserves leading comments. When the migrated profile is the active one, `~/.omo/omo.jsonc` is re-rendered automatically, appending `; re-rendered active configuration` to that profile's message; the bare (all-profiles) run finishes with a `Migrated <k>/<m> profile(s)` summary (`Would migrate <k>/<m> profile(s)` with `--dry-run`).
+
+Exit codes: 0 on success or no-op, 2 for an unknown profile or usage error, 1 for an invalid profile (reported as `<name>: INVALID: <error>` on stderr; other profiles still migrate).
+
+```bash
+opencode-config-switcher migrate
+opencode-config-switcher migrate --profile work --dry-run
+```
+
 ## The TUI
 
 ### SELECTOR (bare invocation)
@@ -296,11 +312,18 @@ v2 switched files inside `~/.config/opencode/` by copying one `oh-my-*.json` pre
 - **Bring your presets along**: `import --all-legacy` converts every legacy file into a profile (the interactive chooser and first-run onboarding do the same per file). Imports transform v2 shapes (`variant`, `fallback_models`, category `model` fields) into the v3 document format and never modify the source files.
 - **`~/.config/opencode/` is read-only** for this tool from now on; it is only consulted as an import source.
 - **Upstream relationship**: oh-my-opencode's own `omo config migrate` command migrates a single configuration file. This tool complements it with profile management, switching, and model maintenance on top of the migrated `omo.jsonc`; it does not replace it.
+- **v3.1 canonical chains**: Agent chains are now stored canonically, matching oh-my-openagent's `models` format. The `migrate` subcommand converts pre-3.1 profile stores in place (see `migrate` above); profiles written by this version are already canonical.
 - The legacy `switch_oh-my-opencode_config.py` command keeps working as an alias of the same CLI.
 
 ## Version History
 
-- **v3.0.0** (Current):
+- **v3.1.0** (Current):
+  - Canonical `models` chains: agent routes stored in oh-my-openagent's `models` format across engine, editor, TUI, and import paths
+  - `migrate` subcommand: convert pre-3.1 profile stores (bare = all profiles, `--profile NAME`, `--dry-run` previews)
+  - Leading-comment preservation on every profile write (editor save, replace-model, migrate, import)
+  - `replace-model` scans canonical agent `models` chains in addition to legacy `fallback_models`
+
+- **v3.0.0**:
   - Profile-based architecture: named profiles in `~/.omo/profiles/`, render-on-select into `~/.omo/omo.jsonc`
   - Subcommand CLI: `list`, `show`, `active`, `use` (alias `select`), `create`, `edit`, `delete`, `import`, `replace-model`
   - Curses selector with `n`/`D`/`e`/`i`/`r` actions, plus a profile editor with route lists, model-entry forms, and a settings form
