@@ -1,13 +1,16 @@
 """Tests for the Task 14 chain-surgery layer (routes + entries).
 
 Locks the PURE-EMIT boundary's deferred work: ``chain_entries`` /
-``write_chain`` with the Task 5 observed-pair collapse asymmetry
-(agent ``{model}``-only dicts collapse to strings, category dicts
-never do), route add/rename/delete operations, entry
-move/remove/set with agent primary promotion, and the shell glue
-``apply_transition`` / ``ShellPrompt``.  The killer test is the no-op
-round trip on the ground-truth fixture: read chain → write chain →
-deep-equal the whole document.
+``write_chain`` — agents read canonical ``models`` lists and legacy
+``model``+``fallback_models`` compositions, but ALWAYS write
+canonical ``models`` (definition settings folded into a string entry
+0; Task 5 observed-pair collapse: agent ``{model}``-only dicts
+collapse to strings, category dicts never do) — route add/rename/
+delete operations, entry move/remove/set with agent primary
+promotion, and the shell glue ``apply_transition`` /
+``ShellPrompt``.  The killer tests live on the ground-truth fixture:
+one round trip migrates every legacy agent to ``models``; a second
+round trip on the migrated document is a no-op.
 """
 
 import copy
@@ -76,20 +79,54 @@ def route(doc, name):
     raise KeyError(name)
 
 
-# ── the killer: ground-truth no-op round trip ──────────────────────
+# ── the killer: ground-truth migration + canonical no-op ───────────
 
 class RoundTripGroundTruthTests(unittest.TestCase):
-    def test_noop_round_trip_deep_equals_original(self):
+    def test_round_trip_migrates_legacy_agents_to_canonical_models(self):
         doc = groundtruth_doc()
-        original = copy.deepcopy(doc.document)
+        original = json.loads(FIXTURE.read_text())
         for item in doc.routes():
             write_chain(item, chain_entries(item))
-        self.assertEqual(doc.document, original)
+        expected = copy.deepcopy(original)
+        for block in expected["[opencode]"]["agents"].values():
+            fallbacks = block.pop("fallback_models")
+            primary = block.pop("model")
+            reasoning = block.pop("reasoning", None)
+            entry = {"model": primary, "reasoning": reasoning} \
+                if reasoning is not None else primary
+            block["models"] = [entry, *fallbacks]
+        self.assertEqual(doc.document, expected)
+
+    def test_migrated_metis_folds_reasoning_into_entry_zero(self):
+        doc = groundtruth_doc()
+        item = route(doc, "metis")
+        write_chain(item, chain_entries(item))
+        self.assertEqual(item.block, {"models": [
+            {"model": "provider-1/model-1", "reasoning": "max"},
+            {"model": "provider-12/model-12", "reasoning": "xhigh"},
+            {"model": "provider-13/model-13", "reasoning": "max"},
+            {"model": "provider-14/model-14", "reasoning": "max"},
+        ]})
+
+    def test_second_round_trip_on_canonical_document_is_noop(self):
+        doc = groundtruth_doc()
+        for item in doc.routes():
+            write_chain(item, chain_entries(item))
+        once = copy.deepcopy(doc.document)
+        for item in doc.routes():
+            write_chain(item, chain_entries(item))
+        self.assertEqual(doc.document, once)
 
     def test_chain_length_matches_route_entry_count_everywhere(self):
         doc = groundtruth_doc()
         for item in doc.routes():
             with self.subTest(route=item.name):
+                self.assertEqual(len(chain_entries(item)),
+                                 route_entry_count(item))
+        for item in doc.routes():
+            write_chain(item, chain_entries(item))
+        for item in doc.routes():
+            with self.subTest(canonical_route=item.name):
                 self.assertEqual(len(chain_entries(item)),
                                  route_entry_count(item))
 
@@ -99,11 +136,18 @@ class RoundTripGroundTruthTests(unittest.TestCase):
         models = doc.document["[opencode]"]["categories"][
             "visual-engineering"]["models"]
         self.assertIs(chain[1], models[1])
-        achain = chain_entries(route(doc, "sisyphus"))
-        self.assertIs(achain[0], doc.document["[opencode]"]["agents"][
-            "sisyphus"]["model"])
-        self.assertIs(achain[1], doc.document["[opencode]"]["agents"][
-            "sisyphus"]["fallback_models"][0])
+        junior = doc.document["[opencode]"]["agents"]["sisyphus-junior"]
+        jchain = chain_entries(route(doc, "sisyphus-junior"))
+        self.assertIs(jchain[0], junior["model"])
+        self.assertIs(jchain[1], junior["fallback_models"][0])
+
+    def test_canonical_agent_entries_are_live_references(self):
+        doc = groundtruth_doc()
+        item = route(doc, "sisyphus-junior")
+        write_chain(item, chain_entries(item))
+        models = item.block["models"]
+        self.assertIs(chain_entries(item)[0], models[0])
+        self.assertIs(chain_entries(item)[1], models[1])
 
     def test_model_only_agent_fallback_collapses_via_round_trip(self):
         # The fixture agents happen to carry reasoning on every dict
@@ -112,8 +156,7 @@ class RoundTripGroundTruthTests(unittest.TestCase):
             "model": "m", "fallback_models": [{"model": "f"}]}}}})
         item = doc.routes()[0]
         write_chain(item, chain_entries(item))
-        self.assertEqual(item.block,
-                         {"model": "m", "fallback_models": ["f"]})
+        self.assertEqual(item.block, {"models": ["m", "f"]})
 
     def test_empty_chain_write_then_reread(self):
         block = {"model": "m", "fallback_models": ["f"]}
@@ -127,16 +170,21 @@ class RoundTripGroundTruthTests(unittest.TestCase):
 class GroundTruthMutationTests(unittest.TestCase):
     def test_move_fallback1_up_on_metis_changes_only_that_order(self):
         """QA scenario: one intended order change, everything else
-        byte-identical (deep-compare against a hand-built expected)."""
+        deep-equal (the expected document restates the migration:
+        primary folded with def-level reasoning, fallbacks swapped)."""
         doc = groundtruth_doc()
-        original = copy.deepcopy(doc.document)
+        original = json.loads(FIXTURE.read_text())
         item = route(doc, "metis")   # model + 3 reasoning fallbacks
         chain = chain_entries(item)
         chain.insert(1, chain.pop(2))   # fallback[1] up
         write_chain(item, chain)
         expected = copy.deepcopy(original)
-        fb = expected["[opencode]"]["agents"]["metis"]["fallback_models"]
-        fb[0], fb[1] = fb[1], fb[0]
+        metis = expected["[opencode]"]["agents"]["metis"]
+        fallbacks = metis.pop("fallback_models")
+        metis["models"] = [
+            {"model": metis.pop("model"),
+             "reasoning": metis.pop("reasoning")},
+            fallbacks[1], fallbacks[0], fallbacks[2]]
         self.assertEqual(doc.document, expected)
         self.assertEqual(route_entry_count(item), 4)
 
@@ -162,6 +210,20 @@ class ChainViewTests(unittest.TestCase):
         doc = EditorDocument("x", {"[opencode]": {"agents": {"a": {
             "model": "m", "fallback_models": "oops"}}}})
         self.assertEqual(chain_entries(doc.routes()[0]), ["m"])
+
+    def test_agent_canonical_models_list_reads_directly(self):
+        doc = EditorDocument("x", {"[opencode]": {"agents": {"a": {
+            "models": ["m0", {"model": "m1", "reasoning": "high"}]}}}})
+        self.assertEqual(chain_entries(doc.routes()[0]),
+                         ["m0", {"model": "m1", "reasoning": "high"}])
+
+    def test_agent_models_list_wins_over_legacy_keys(self):
+        doc = EditorDocument("x", {"[opencode]": {"agents": {"a": {
+            "model": "legacy", "fallback_models": ["lf"],
+            "models": ["c0", "c1"]}}}})
+        item = doc.routes()[0]
+        self.assertEqual(chain_entries(item), ["c0", "c1"])
+        self.assertEqual(route_entry_count(item), 2)
 
     def test_category_models_list(self):
         self.assertEqual(
@@ -208,27 +270,27 @@ class WriteChainCategoryTests(unittest.TestCase):
 # ── write-back: agents ─────────────────────────────────────────────
 
 class WriteChainAgentTests(unittest.TestCase):
-    def test_write_sets_model_and_fallbacks_with_collapse(self):
+    def test_write_stores_collapsed_canonical_models(self):
         block = {"reasoning": "high"}
         item = RouteItem("agent", "a", block, None)
         write_chain(item, [{"model": "p"}, {"model": "f1"},
                            {"model": "f2", "reasoning": "low"}, "f3"])
         self.assertEqual(block, {
-            "reasoning": "high", "model": "p",
-            "fallback_models": ["f1", {"model": "f2", "reasoning": "low"},
-                                "f3"]})
+            "reasoning": "high",
+            "models": ["p", "f1", {"model": "f2", "reasoning": "low"},
+                       "f3"]})
 
     def test_string_primary_stays_string(self):
         block = {}
         item = RouteItem("agent", "a", block, None)
         write_chain(item, ["m", "f"])
-        self.assertEqual(block, {"model": "m", "fallback_models": ["f"]})
+        self.assertEqual(block, {"models": ["m", "f"]})
 
-    def test_single_entry_chain_writes_empty_fallback_list(self):
+    def test_single_entry_chain_writes_models_list(self):
         block = {}
         item = RouteItem("agent", "a", block, None)
         write_chain(item, ["m"])
-        self.assertEqual(block, {"model": "m", "fallback_models": []})
+        self.assertEqual(block, {"models": ["m"]})
 
     def test_empty_chain_removes_both_keys_keeps_others(self):
         block = {"model": "m", "reasoning": "max",
@@ -238,23 +300,59 @@ class WriteChainAgentTests(unittest.TestCase):
         self.assertEqual(block, {"reasoning": "max"})
 
     def test_existing_key_positions_preserved(self):
-        block = {"model": "m0", "reasoning": "max",
-                 "fallback_models": ["m1"]}
+        block = {"description": "d", "model": "m0",
+                 "fallback_models": ["m1"], "tools": {"t": 1}}
         item = RouteItem("agent", "a", block, None)
         write_chain(item, ["m0", "m1"])
         self.assertEqual(list(block),
-                         ["model", "reasoning", "fallback_models"])
+                         ["description", "tools", "models"])
+
+    def test_legacy_save_folds_definition_reasoning_into_entry_zero(self):
+        block = {"model": "m0", "reasoning": "max",
+                 "fallback_models": ["m1", "m2"]}
+        item = RouteItem("agent", "a", block, None)
+        write_chain(item, chain_entries(item))
+        self.assertEqual(block, {"models": [
+            {"model": "m0", "reasoning": "max"}, "m1", "m2"]})
+
+    def test_legacy_save_folds_every_definition_settings_key(self):
+        block = {"model": "m", "reasoning": "high",
+                 "provider_options": {"p": {"x": 1}},
+                 "fallback_models": []}
+        item = RouteItem("agent", "a", block, None)
+        write_chain(item, chain_entries(item))
+        self.assertEqual(block, {"models": [{
+            "model": "m", "reasoning": "high",
+            "provider_options": {"p": {"x": 1}}}]})
+
+    def test_canonical_round_trip_unchanged(self):
+        block = {"description": "d", "models": [
+            "p", {"model": "f", "reasoning": "high"}]}
+        item = RouteItem("agent", "a", block, None)
+        expected = copy.deepcopy(block)
+        write_chain(item, chain_entries(item))
+        self.assertEqual(block, expected)
+
+    def test_dict_entry_zero_leaves_definition_settings_in_place(self):
+        block = {"reasoning": "max",
+                 "model": {"model": "m", "reasoning": "high"},
+                 "fallback_models": ["f"]}
+        item = RouteItem("agent", "a", block, None)
+        write_chain(item, chain_entries(item))
+        self.assertEqual(block, {
+            "reasoning": "max",
+            "models": [{"model": "m", "reasoning": "high"}, "f"]})
 
 
 # ── route operations ───────────────────────────────────────────────
 
 class AddRouteTests(unittest.TestCase):
-    def test_add_creates_empty_block_with_ok_message(self):
+    def test_add_agent_creates_canonical_empty_models_block(self):
         doc = make_doc()
         result = add_route(doc, "agent", "newbie")
         self.assertEqual(result, OperationResult(True, "Route added: newbie"))
         self.assertEqual(
-            doc.document["[opencode]"]["agents"]["newbie"], {})
+            doc.document["[opencode]"]["agents"]["newbie"], {"models": []})
 
     def test_add_rejects_duplicate_exact_message(self):
         doc = make_doc()
@@ -277,6 +375,8 @@ class AddRouteTests(unittest.TestCase):
                          {"[opencode]": {"categories": {"first": {}}}})
         self.assertEqual(add_route(doc, "agent", "one"),
                          OperationResult(True, "Route added: one"))
+        self.assertEqual(doc.document["[opencode]"]["agents"],
+                         {"one": {"models": []}})
         self.assertEqual(list(doc.document["[opencode]"]),
                          ["categories", "agents"])
 
@@ -362,20 +462,18 @@ class DeleteRouteByNameTests(unittest.TestCase):
 # ── entry operations ───────────────────────────────────────────────
 
 class MoveChainEntryTests(unittest.TestCase):
-    def test_agent_adjacent_move_writes_back_split(self):
+    def test_agent_adjacent_move_writes_canonical_order(self):
         doc = make_doc()
         item = route(doc, "build")
         self.assertEqual(move_chain_entry(item, 1, 0),
                          OperationResult(True, "Entry moved"))
-        self.assertEqual(item.block,
-                         {"model": "m1", "fallback_models": ["m0", "m2"]})
+        self.assertEqual(item.block, {"models": ["m1", "m0", "m2"]})
 
     def test_agent_arbitrary_move_down(self):
         doc = make_doc()
         item = route(doc, "build")
         move_chain_entry(item, 0, 2)
-        self.assertEqual(item.block,
-                         {"model": "m1", "fallback_models": ["m2", "m0"]})
+        self.assertEqual(item.block, {"models": ["m1", "m2", "m0"]})
 
     def test_category_move_last_to_front(self):
         doc = make_doc()
@@ -420,34 +518,31 @@ class RemoveChainEntryTests(unittest.TestCase):
         item = route(doc, "build")
         self.assertEqual(remove_chain_entry(item, 2),
                          OperationResult(True, "Entry removed"))
-        self.assertEqual(item.block,
-                         {"model": "m0", "fallback_models": ["m1"]})
+        self.assertEqual(item.block, {"models": ["m0", "m1"]})
 
     def test_remove_agent_primary_promotes_fallback(self):
         doc = make_doc()
         item = route(doc, "build")
         remove_chain_entry(item, 0)
-        self.assertEqual(item.block,
-                         {"model": "m1", "fallback_models": ["m2"]})
+        self.assertEqual(item.block, {"models": ["m1", "m2"]})
 
     def test_promotion_keeps_reasoning_dict_and_collapses_plain(self):
         block = {"model": "m", "fallback_models": [
             {"model": "f", "reasoning": "high"}, {"model": "g"}]}
         item = RouteItem("agent", "a", block, None)
         remove_chain_entry(item, 0)
-        self.assertEqual(block, {
-            "model": {"model": "f", "reasoning": "high"},
-            "fallback_models": ["g"]})
+        self.assertEqual(block, {"models": [
+            {"model": "f", "reasoning": "high"}, "g"]})
 
-    def test_remove_until_empty_removes_both_keys(self):
+    def test_remove_until_empty_removes_chain_keys(self):
         block = {"model": "m", "reasoning": "low",
                  "fallback_models": ["f"]}
         item = RouteItem("agent", "a", block, None)
         remove_chain_entry(item, 0)
-        self.assertEqual(block, {"reasoning": "low", "model": "f",
-                                 "fallback_models": []})
+        self.assertEqual(block,
+                         {"models": [{"model": "f", "reasoning": "low"}]})
         remove_chain_entry(item, 0)
-        self.assertEqual(block, {"reasoning": "low"})
+        self.assertEqual(block, {})
 
     def test_remove_from_empty_chain_is_error(self):
         item = RouteItem("agent", "a", {}, None)
@@ -483,29 +578,27 @@ class SetEntryTests(unittest.TestCase):
         doc = make_doc()
         item = route(doc, "build")
         set_entry(item, 0, {"model": "p9"})
-        self.assertEqual(item.block["model"], "p9")
-        self.assertEqual(item.block["fallback_models"], ["m1", "m2"])
+        self.assertEqual(item.block["models"], ["p9", "m1", "m2"])
 
     def test_replace_agent_fallback_keeps_reasoning_dict(self):
         doc = make_doc()
         item = route(doc, "build")
         set_entry(item, 1, {"model": "f9", "reasoning": "max"})
-        self.assertEqual(item.block["fallback_models"],
-                         [{"model": "f9", "reasoning": "max"}, "m2"])
+        self.assertEqual(item.block["models"],
+                         ["m0", {"model": "f9", "reasoning": "max"}, "m2"])
 
     def test_replace_agent_fallback_collapses_model_only(self):
         doc = make_doc()
         item = route(doc, "build")
         set_entry(item, 1, {"model": "f9"})
-        self.assertEqual(item.block["fallback_models"], ["f9", "m2"])
+        self.assertEqual(item.block["models"], ["m0", "f9", "m2"])
 
     def test_append_via_past_end_sentinel_agent(self):
         doc = make_doc()
         item = route(doc, "build")   # 3 entries; index 3 = NEW
         set_entry(item, 3, "m3")
-        self.assertEqual(item.block["model"], "m0")
-        self.assertEqual(item.block["fallback_models"],
-                         ["m1", "m2", "m3"])
+        self.assertEqual(item.block["models"],
+                         ["m0", "m1", "m2", "m3"])
 
     def test_append_via_past_end_sentinel_category(self):
         doc = make_doc()
@@ -513,10 +606,10 @@ class SetEntryTests(unittest.TestCase):
         set_entry(item, 3, {"model": "c3"})
         self.assertEqual(item.block["models"][-1], {"model": "c3"})
 
-    def test_append_on_empty_chain_agent_writes_both_keys(self):
+    def test_append_on_empty_chain_agent_writes_models_list(self):
         item = RouteItem("agent", "a", {}, None)
         set_entry(item, 0, "m")
-        self.assertEqual(item.block, {"model": "m", "fallback_models": []})
+        self.assertEqual(item.block, {"models": ["m"]})
 
     def test_index_past_sentinel_rejected(self):
         item = route(make_doc(), "build")
@@ -542,7 +635,7 @@ class ApplyTransitionTests(unittest.TestCase):
                          ("move-down", (0, 1)))
         self.assertIsNone(apply_transition(doc, state, trans))
         self.assertEqual(doc.document["[opencode]"]["agents"]["build"],
-                         {"model": "m1", "fallback_models": ["m0", "m2"]})
+                         {"models": ["m1", "m0", "m2"]})
         self.assertTrue(state.dirty)
 
     def test_move_up_payload_performs_doc_surgery(self):
@@ -552,7 +645,7 @@ class ApplyTransitionTests(unittest.TestCase):
         self.assertEqual((trans.action, trans.payload), ("move-up", (1, 0)))
         apply_transition(doc, state, trans)
         self.assertEqual(doc.document["[opencode]"]["agents"]["build"],
-                         {"model": "m1", "fallback_models": ["m0", "m2"]})
+                         {"models": ["m1", "m0", "m2"]})
 
     def test_delete_entry_confirm_removes_and_clamps_last_index(self):
         doc = make_doc()
@@ -563,7 +656,7 @@ class ApplyTransitionTests(unittest.TestCase):
                          ("confirm-yes", "delete-entry"))
         self.assertIsNone(apply_transition(doc, state, trans))
         self.assertEqual(doc.document["[opencode]"]["agents"]["build"],
-                         {"model": "m0", "fallback_models": ["m1"]})
+                         {"models": ["m0", "m1"]})
         self.assertTrue(state.dirty)
         self.assertEqual(state.entry_index, 1)   # clamped from 2
 
@@ -574,7 +667,7 @@ class ApplyTransitionTests(unittest.TestCase):
         trans = handle_key(state, "y", doc)
         apply_transition(doc, state, trans)
         self.assertEqual(doc.document["[opencode]"]["agents"]["build"],
-                         {"model": "m1", "fallback_models": ["m2"]})
+                         {"models": ["m1", "m2"]})
         self.assertEqual(state.entry_index, 0)
 
     def test_delete_route_confirm_does_no_extra_work(self):

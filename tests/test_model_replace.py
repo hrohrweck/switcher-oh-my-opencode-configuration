@@ -9,7 +9,10 @@ Contract notes (binding for Tasks 10/16):
   key (``"[opencode]"``) or ``"<root>"`` for the harness-neutral root;
   ``route`` is the agent/category name, ``""`` for catalog hits.  Walk
   order: ``<root>`` first, then HARNESS_BLOCKS order; inside a section
-  agents (primary, then fallback chain) -> categories -> catalog.
+  agents (primary, then fallback chain, then canonical ``models`` chain)
+  -> categories -> catalog.  Agent ``models`` chains (canonical form:
+  primary at ``models[0]``, string and object entries) are scanned with
+  the same ``{key}[{index}]`` label grammar as ``fallback_models``.
 - Exact string equality only — no substring, prefix, or case folding;
   malformed containers are skipped silently (no crash).
 - ``UseStatus`` gains ``NO_MATCHES`` (zero hits, zero writes — checked
@@ -326,6 +329,78 @@ class ReplaceModelPureTests(unittest.TestCase):
         self.assertEqual(hits, ())
         _assert_same_value_and_order(self, changed, doc)
 
+    def test_agent_canonical_models_chain_strings_and_objects(self):
+        doc = {
+            "$schema": OMO_SCHEMA_URL,
+            "[opencode]": {
+                "agents": {
+                    "researcher": {
+                        "models": [
+                            OLD,
+                            "acme/keep-1",
+                            {"model": OLD, "reasoning": "max",
+                             "temperature": 0.7},
+                        ],
+                    },
+                },
+            },
+        }
+
+        changed, hits = replace_model(doc, OLD, NEW)
+
+        self.assertEqual(hits, (
+            ReplacementHit("[opencode]", "researcher", "models[0]",
+                           OLD, NEW),
+            ReplacementHit("[opencode]", "researcher", "models[2]",
+                           OLD, NEW),
+        ))
+        _assert_same_value_and_order(self, changed, {
+            "$schema": OMO_SCHEMA_URL,
+            "[opencode]": {
+                "agents": {
+                    "researcher": {
+                        "models": [
+                            NEW,
+                            "acme/keep-1",
+                            {"model": NEW, "reasoning": "max",
+                             "temperature": 0.7},
+                        ],
+                    },
+                },
+            },
+        })
+
+    def test_agent_models_bare_string_replaced_as_index_zero(self):
+        doc = {"[opencode]": {"agents": {"a": {"models": OLD}}}}
+
+        changed, hits = replace_model(doc, OLD, NEW)
+
+        self.assertEqual(hits, (
+            ReplacementHit("[opencode]", "a", "models[0]", OLD, NEW),
+        ))
+        self.assertEqual(
+            changed["[opencode]"]["agents"]["a"]["models"], NEW)
+
+    def test_legacy_and_canonical_agent_surfaces_all_hit(self):
+        doc = {"[opencode]": {"agents": {"a": {
+            "model": OLD,
+            "fallback_models": [OLD, "acme/keep-1"],
+            "models": ["acme/keep-2", OLD],
+        }}}}
+
+        changed, hits = replace_model(doc, OLD, NEW)
+
+        self.assertEqual(hits, (
+            ReplacementHit("[opencode]", "a", "model", OLD, NEW),
+            ReplacementHit("[opencode]", "a", "fallback_models[0]",
+                           OLD, NEW),
+            ReplacementHit("[opencode]", "a", "models[1]", OLD, NEW),
+        ))
+        block = changed["[opencode]"]["agents"]["a"]
+        self.assertEqual(block["model"], NEW)
+        self.assertEqual(block["fallback_models"], [NEW, "acme/keep-1"])
+        self.assertEqual(block["models"], ["acme/keep-2", NEW])
+
 
 class ReplaceModelInProfileTests(TempHomeTestCase):
     def test_apply_writes_profile_bak_and_leaves_omo_alone(self):
@@ -387,6 +462,41 @@ class ReplaceModelInProfileTests(TempHomeTestCase):
         self.assertFalse(
             target.with_name(target.name + ".BAK").exists())
         self.assertFalse(self.paths.omo_path.exists())
+
+    def test_dry_run_preview_lists_canonical_agent_models_labels(self):
+        doc = {
+            "$schema": OMO_SCHEMA_URL,
+            "[opencode]": {
+                "agents": {
+                    "researcher": {
+                        "models": [OLD, "acme/keep-1",
+                                   {"model": OLD, "reasoning": "max"}],
+                    },
+                },
+            },
+        }
+        write_profile(self.paths, "work", doc)
+        target = _profile_path(self.paths, "work")
+        stat_before = target.stat()
+        bytes_before = target.read_bytes()
+
+        result = replace_model_in_profile(
+            self.paths, "work", OLD, NEW, dry_run=True)
+
+        self.assertEqual(result.status, UseStatus.PREVIEW)
+        self.assertEqual(result.hits, (
+            ReplacementHit("[opencode]", "researcher", "models[0]",
+                           OLD, NEW),
+            ReplacementHit("[opencode]", "researcher", "models[2]",
+                           OLD, NEW),
+        ))
+        self.assertEqual(
+            [f"  {hit.section}.{hit.route}.{hit.field}"
+             for hit in result.hits],
+            ["  [opencode].researcher.models[0]",
+             "  [opencode].researcher.models[2]"])
+        self.assertEqual(target.read_bytes(), bytes_before)
+        self.assertEqual(target.stat().st_mtime_ns, stat_before.st_mtime_ns)
 
     def test_no_matches_message_and_zero_writes(self):
         write_profile(self.paths, "work", NO_MATCH_DOC)

@@ -15,6 +15,11 @@ Contracts (binding for Tasks 6/9/11/12):
 - Overwrites keep a SINGLE-generation backup: ``shutil.copy2(target,
   target + ".BAK")`` before writing (the v2 switching.py pattern,
   metadata-preserving).  First-time writes create no ``.BAK``.
+- Overwrites preserve any hand-authored leading ``//`` comment block from
+  the previous file (via ``jsonc.extract_leading_comments``); a block
+  equal to just the canonical header carries no user content and is
+  treated as "no comments", keeping rewrites of tool-written files
+  byte-identical.
 - :func:`delete_profile` renames the profile to ``<same>.BAK`` (replacing
   any previous backup) and NEVER touches the ``.active`` marker: clearing
   the marker after deleting the active profile is the caller's job.
@@ -33,7 +38,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from opencode_config_switcher.jsonc import JsoncError
+from opencode_config_switcher.jsonc import _HEADER_LINE as _CANONICAL_HEADER_LINE
 from opencode_config_switcher.jsonc import dumps as jsonc_dumps
+from opencode_config_switcher.jsonc import extract_leading_comments
 from opencode_config_switcher.jsonc import loads as jsonc_loads
 from opencode_config_switcher.omoconfig import (
     CONTROL_KEYS,
@@ -203,16 +210,29 @@ def write_profile(paths: Paths, name: str, document: dict, *,
     Existing target without ``overwrite`` raises :class:`ProfileExistsError`;
     with ``overwrite`` the previous bytes go to a single-generation
     ``{name}.jsonc.BAK`` first (first-time writes create no ``.BAK``).
-    ``profiles_dir`` is created on demand.
+    ``profiles_dir`` is created on demand.  On overwrite, a leading ``//``
+    comment block in the previous file is re-emitted at the top of the new
+    one; a block consisting solely of the canonical header is treated as
+    no user comments so tool-written files stay byte-identical.
     """
     validate_name(name)
     target = paths.profiles_dir / (name + ".jsonc")
+    comments: list[str] | None = None
     if target.exists():
         if not overwrite:
             raise ProfileExistsError(name)
+        try:
+            previous_text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            previous_text = None
+        if previous_text is not None:
+            extracted = extract_leading_comments(previous_text)
+            if extracted and extracted != [_CANONICAL_HEADER_LINE]:
+                comments = extracted
         shutil.copy2(target, target.with_name(target.name + ".BAK"))
     paths.profiles_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(jsonc_dumps(document), encoding="utf-8")
+    target.write_text(jsonc_dumps(document, comments=comments),
+                      encoding="utf-8")
     return target
 
 

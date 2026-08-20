@@ -20,7 +20,12 @@ import json
 import unittest
 from pathlib import Path
 
-from opencode_config_switcher.jsonc import JsoncError, dumps, loads
+from opencode_config_switcher.jsonc import (
+    JsoncError,
+    dumps,
+    extract_leading_comments,
+    loads,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SRC = Path(__file__).resolve().parents[1] / "src" / "opencode_config_switcher"
@@ -266,6 +271,76 @@ class RoundTripInvariantTest(unittest.TestCase):
                 value = loads((FIXTURES / name).read_text(encoding="utf-8"))
                 self.assertEqual(loads(dumps(value)), value)
                 self.assertEqual(dumps(loads(dumps(value))), dumps(value))
+
+
+class ExtractLeadingCommentsTest(unittest.TestCase):
+    """extract_leading_comments() returns the contiguous leading // block."""
+
+    def test_collects_comment_block_dropping_trailing_blank(self):
+        self.assertEqual(
+            extract_leading_comments("// a\n// b\n\n{\n}"),
+            ["// a", "// b"],
+        )
+
+    def test_stops_at_first_content_line(self):
+        self.assertEqual(extract_leading_comments('{"a": 1}\n// later\n'), [])
+
+    def test_empty_text_returns_empty_list(self):
+        self.assertEqual(extract_leading_comments(""), [])
+
+    def test_blank_lines_inside_block_are_kept_verbatim(self):
+        self.assertEqual(
+            extract_leading_comments("// a\n\n// b\n{\n}"),
+            ["// a", "", "// b"],
+        )
+
+    def test_trailing_whitespace_stripped_from_each_line(self):
+        self.assertEqual(
+            extract_leading_comments("// a   \n// b\t\n{\n}"),
+            ["// a", "// b"],
+        )
+
+    def test_only_blank_lines_returns_empty_list(self):
+        self.assertEqual(extract_leading_comments("\n  \n\t\n"), [])
+
+    def test_indented_comment_counts_as_comment_kept_verbatim(self):
+        self.assertEqual(
+            extract_leading_comments("  // indented\n{\n}"),
+            ["  // indented"],
+        )
+
+
+class DumpsCommentsTest(unittest.TestCase):
+    """dumps(value, comments=...) preserves a leading block on demand."""
+
+    def test_no_comments_output_is_byte_identical_to_legacy(self):
+        value = {"b": 2, "a": {"ä": "é", "list": [1, True, None]}}
+        legacy = (
+            "// OMO configuration\n"
+            + json.dumps(value, indent=2, ensure_ascii=False)
+            + "\n"
+        )
+        self.assertEqual(dumps(value), legacy)
+        self.assertEqual(dumps(value, comments=None), legacy)
+        self.assertEqual(dumps(value, comments=[]), legacy)
+
+    def test_comments_emitted_first_then_blank_then_json(self):
+        result = dumps({"a": 1}, ["// a"])
+        self.assertTrue(result.startswith("// a\n\n{"))
+
+    def test_canonical_header_not_duplicated_when_comments_given(self):
+        result = dumps({"a": 1}, ["// OMO configuration", "// user note"])
+        self.assertEqual(result.count("// OMO configuration"), 1)
+        self.assertTrue(
+            result.startswith("// OMO configuration\n// user note\n\n{"))
+
+    def test_bare_comment_lines_get_slash_prefix(self):
+        result = dumps({"a": 1}, ["plain note"])
+        self.assertTrue(result.startswith("// plain note\n\n{"))
+
+    def test_document_still_round_trips_through_loads(self):
+        value = {"x": [1, 2], "y": {"z": "w"}}
+        self.assertEqual(loads(dumps(value, ["// note"])), value)
 
 
 class StdlibOnlyTest(unittest.TestCase):

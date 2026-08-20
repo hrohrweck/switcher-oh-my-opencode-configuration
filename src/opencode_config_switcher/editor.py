@@ -31,9 +31,16 @@ Shell contract:
 Chain surgery layer (Task 14, binding for Tasks 15/16):
     ``chain_entries``/``write_chain`` translate between a route block
     and an ordered entry chain: category → its ``models`` list; agent →
-    ``model`` (index 0) + ``fallback_models`` (indices 1+), with the
-    Task 5 observed-pair collapse — an agent model ref that is a dict
-    whose ONLY key is ``model`` collapses to the bare string; category
+    ``models`` when the block carries a canonical chain, else the
+    legacy composition ``model`` (index 0) + ``fallback_models``
+    (indices 1+) so legacy profiles remain editable.  Agent writes are
+    ALWAYS canonical: ``write_chain`` stores ``block["models"]``,
+    folds the definition-level settings keys (``reasoning``,
+    ``provider_options`` …) into a STRING entry 0 and removes them
+    from the block together with the legacy ``model`` /
+    ``fallback_models`` keys, and applies the Task 5 observed-pair
+    collapse — an agent model ref that is a dict whose ONLY key is
+    ``model`` collapses to the bare string; category
     dict entries NEVER collapse.  ``add_route``/``rename_route``/
     ``delete_route_by_name``/``move_chain_entry``/``remove_chain_entry``
     /``set_entry`` mutate the document and report via ``OperationResult``
@@ -42,9 +49,9 @@ Chain surgery layer (Task 14, binding for Tasks 15/16):
     transition: it performs the deferred move/delete-entry surgery,
     marks dirty where the core could not (delete-entry — moves already
     set it in-core), clamps ``entry_index`` after removal, and returns
-    a ``ShellPrompt`` for "add" (None otherwise).      Removing an agent's
-    primary promotes fallback[0] via write-back; an empty agent chain
-    removes both keys.
+    a ``ShellPrompt`` for "add" (None otherwise).      Removing an
+    agent's primary promotes fallback[0] via write-back; an empty
+    agent chain removes the chain keys.
 
 Forms layer (Task 15, binding for Task 16):
     ``FormField``/``FormState`` model the two FORM screens as PURE
@@ -64,6 +71,8 @@ import curses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, NamedTuple
+
+from opencode_config_switcher.transform import _DEFINITION_SETTINGS_KEYS
 
 
 # ── vocabulary ─────────────────────────────────────────────────────
@@ -146,13 +155,17 @@ class EditorDocument:
 
 def route_entry_count(item: RouteItem | None) -> int:
     """Chain length of one route: category → len(models list); agent →
-    (1 if 'model' present) + len(fallback_models list).  Malformed or
-    missing pieces count as 0."""
+    len(models) for a canonical chain, else (1 if 'model' present) +
+    len(fallback_models list).  Malformed or missing pieces count
+    as 0."""
     if item is None:
         return 0
     if item.kind == "category":
         models = item.block.get("models")
         return len(models) if isinstance(models, list) else 0
+    models = item.block.get("models")
+    if isinstance(models, list):
+        return len(models)
     count = 1 if "model" in item.block else 0
     fallbacks = item.block.get("fallback_models")
     if isinstance(fallbacks, list):
@@ -178,12 +191,18 @@ _SECTION_FOR_KIND = {"agent": "agents", "category": "categories"}
 
 def chain_entries(item: RouteItem) -> list:
     """Ordered chain of one route as LIVE entry references inside a
-    fresh list: category → its ``models`` list; agent → ``model`` (when
-    the key exists) followed by ``fallback_models`` (when a list).
-    Malformed pieces read as absent (≙ ``route_entry_count``)."""
+    fresh list: category → its ``models`` list; agent → ``models``
+    when the block carries a canonical chain, else the legacy
+    composition ``model`` (when the key exists) followed by
+    ``fallback_models`` (when a list) so legacy profiles remain
+    editable.  Malformed pieces read as absent (≙
+    ``route_entry_count``)."""
     if item.kind == "category":
         models = item.block.get("models")
         return list(models) if isinstance(models, list) else []
+    models = item.block.get("models")
+    if isinstance(models, list):
+        return list(models)
     entries: list = []
     if "model" in item.block:
         entries.append(item.block["model"])
@@ -206,28 +225,43 @@ def write_chain(item: RouteItem, entries: list) -> None:
 
     Category: ``block["models"] = entries`` — dict entries never
     collapse (Task 5 asymmetry); an absent ``models`` key is not
-    invented for an empty write.  Agent: first entry → ``model``,
-    rest → ``fallback_models`` (collapse per ``_collapse_agent_entry``
-    on both); an empty chain removes BOTH keys.  Every other block key
-    (reasoning, description, tools…) is preserved untouched.
+    invented for an empty write.  Agent: ALWAYS canonical —
+    ``block["models"] = entries`` with ``_collapse_agent_entry``
+    applied to every entry, the legacy ``model`` / ``fallback_models``
+    keys removed, and the definition-level settings keys
+    (``_DEFINITION_SETTINGS_KEYS``, task-1 parity) folded into a
+    STRING entry 0 and then removed from the block (settings next to
+    a dict entry 0 or an empty chain stay in place, as today).
+    Every other block key (reasoning on categories, description,
+    tools…) is preserved untouched; the input list is never mutated.
     """
     block = item.block
     if item.kind == "category":
         if entries or "models" in block:
             block["models"] = entries
         return
-    if entries:
-        block["model"] = _collapse_agent_entry(entries[0])
-        block["fallback_models"] = [
-            _collapse_agent_entry(entry) for entry in entries[1:]]
+    chain = list(entries)
+    settings = {key: block[key] for key in _DEFINITION_SETTINGS_KEYS
+                if key in block}
+    folded: list[str] = []
+    if chain and settings and isinstance(chain[0], str):
+        chain[0] = {"model": chain[0], **settings}
+        folded = list(settings)
+    if chain:
+        block["models"] = [_collapse_agent_entry(entry)
+                           for entry in chain]
     else:
-        block.pop("model", None)
-        block.pop("fallback_models", None)
+        block.pop("models", None)
+    block.pop("model", None)
+    block.pop("fallback_models", None)
+    for key in folded:
+        block.pop(key, None)
 
 
 def add_route(doc: EditorDocument, kind: str, name: str) -> OperationResult:
-    """Create ``{}`` under the kind's section map, creating the map
-    (and the ``[opencode]`` harness) when absent."""
+    """Create the route block under the kind's section map — agents
+    start canonical with ``{"models": []}``, categories with ``{}`` —
+    creating the map (and the ``[opencode]`` harness) when absent."""
     section_name = _SECTION_FOR_KIND.get(kind)
     if section_name is None:
         return OperationResult(False, f"Unknown route kind: {kind}")
@@ -243,7 +277,7 @@ def add_route(doc: EditorDocument, kind: str, name: str) -> OperationResult:
             False, f"Cannot add route: '{section_name}' is not an object")
     if name in section:
         return OperationResult(False, f"Route '{name}' already exists")
-    section[name] = {}
+    section[name] = {"models": []} if kind == "agent" else {}
     return OperationResult(True, f"Route added: {name}")
 
 

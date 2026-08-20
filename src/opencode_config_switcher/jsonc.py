@@ -14,16 +14,22 @@ text length or newline positions, every position ``json`` reports (including
 required.  Comment-like sequences inside string literals are never touched
 because both passes track string state with escape handling.
 
-``dumps`` intentionally strips comments: profiles are machine-managed, and the
-rendered document is the canonical ``// OMO configuration`` header plus strict
-JSON.
+``dumps`` intentionally strips comments from the parsed document: profiles are
+machine-managed, and the rendered document is the canonical
+``// OMO configuration`` header plus strict JSON.  Callers that need to keep a
+hand-authored leading comment block can pass ``extract_leading_comments`` of
+the previous text as ``comments``; the block is then re-emitted verbatim in
+place of the canonical header.
 """
 
 import json
+from typing import Iterable
 
-__all__ = ["JsoncError", "dumps", "loads"]
+__all__ = ["JsoncError", "dumps", "extract_leading_comments", "loads"]
 
 _HEADER = "// OMO configuration\n"
+# The header without its newline; compared against extracted leading blocks.
+_HEADER_LINE = _HEADER.rstrip("\n")
 
 
 class JsoncError(ValueError):
@@ -140,6 +146,43 @@ def loads(text: str) -> object:
         raise JsoncError(exc.lineno, exc.msg) from exc
 
 
-def dumps(value: object) -> str:
-    """Serialize ``value`` deterministically: header comment + strict JSON."""
-    return _HEADER + json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+def extract_leading_comments(text: str) -> list[str]:
+    """Return the contiguous leading ``//`` comment block of ``text``.
+
+    Scans from line 1, collecting lines that are blank or ``//`` comments
+    (trailing whitespace stripped); stops at the first line that is
+    neither.  Returns the collected lines verbatim with trailing blank
+    lines removed.  Inline/trailing comments and ``/* */`` blocks are
+    deliberately out of scope.
+    """
+    collected: list[str] = []
+    for line in text.splitlines():
+        if line.strip() == "" or line.lstrip().startswith("//"):
+            collected.append(line.rstrip())
+            continue
+        break
+    while collected and collected[-1] == "":
+        collected.pop()
+    return collected
+
+
+def dumps(value: object, comments: Iterable[str] | None = None) -> str:
+    """Serialize ``value`` deterministically: header comment + strict JSON.
+
+    When ``comments`` is given and non-empty, each line is emitted first
+    (a ``// `` prefix is added to any non-blank line not already starting
+    with ``//``), followed by one blank line and then the JSON body; the
+    hard-coded ``// OMO configuration`` header is skipped so a preserved
+    header is never duplicated.  When ``comments`` is ``None`` or empty,
+    the output is byte-identical to previous versions.
+    """
+    body = json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+    if comments:
+        lines: list[str] = []
+        for comment in comments:
+            line = comment.rstrip()
+            if line and not line.lstrip().startswith("//"):
+                line = "// " + line
+            lines.append(line)
+        return "\n".join(lines) + "\n\n" + body
+    return _HEADER + body

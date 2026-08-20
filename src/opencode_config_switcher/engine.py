@@ -65,6 +65,32 @@ Model replacement (Task 7; binding for Tasks 10/16):
 - ``replace_model_all`` iterates ``list_profiles`` order; invalid
   profiles surface as their BLOCKED result (skip-and-report, never
   raises).
+
+Profile migration — legacy ``fallback_models`` → canonical ``models``
+chains (reuses the Task 1 transform helpers):
+
+- ``MigrateResult`` mirrors ``ReplaceResult`` with ``routes`` (legacy
+  route count from :func:`transform.migrate_document`) in place of
+  ``hits`` plus a ``rerendered`` flag.  Exact messages:
+  - ``Profile '{name}' not found``                      (BLOCKED, missing)
+  - ``Invalid profile name: {name!r}``                  (BLOCKED, bad name)
+  - ``Cannot migrate invalid profile: {n}: {error}``    (BLOCKED, invalid)
+  - ``No migration needed for profile '{name}'``        (NO_MATCHES, zero
+    writes — the profile is already canonical)
+  - ``Would migrate profile '{name}' ({n} route(s))``   (PREVIEW, dry-run,
+    zero writes)
+  - ``Migrated profile '{name}' ({n} route(s))``        (APPLIED; write
+    errors are FAILED with ``str(exc)``)
+- Applying through :func:`profiles.write_profile` inherits the
+  ``.BAK`` backup and leading-comment preservation; a zero-route
+  profile is NEVER rewritten.  When the migrated profile is ACTIVE the
+  engine ALWAYS re-renders through ``use_profile`` with the same
+  suffix rules as ``replace_model_in_profile`` (``;
+  re-rendered active configuration`` sets ``rerendered=True``; a
+  FAILED re-render appends ``; re-render failed: {error}`` while the
+  status stays APPLIED; NOOP appends nothing).
+- ``migrate_all`` iterates ``list_profiles`` order; invalid profiles
+  surface as their BLOCKED result (skip-and-report, never raises).
 """
 
 from __future__ import annotations
@@ -95,18 +121,22 @@ from opencode_config_switcher.profiles import (
     set_active,
     write_profile,
 )
+from opencode_config_switcher.transform import migrate_document
 
 __all__ = [
     "UseStatus",
     "UseResult",
     "ReplacementHit",
     "ReplaceResult",
+    "MigrateResult",
     "render_document",
     "use_profile",
     "capture_current",
     "replace_model",
     "replace_model_in_profile",
     "replace_model_all",
+    "migrate_profile",
+    "migrate_all",
 ]
 
 
@@ -318,6 +348,7 @@ def replace_model(document: dict, old: str,
                     block["model"] = new
                     hit(label, name, "model")
                 replace_entries(block, "fallback_models", name)
+                replace_entries(block, "models", name)
         categories = section.get("categories")
         if isinstance(categories, dict):
             for name, block in categories.items():
@@ -407,5 +438,97 @@ def replace_model_all(paths: Paths, old: str, new: str, *,
         (record.name,
          replace_model_in_profile(paths, record.name, old, new,
                                   dry_run=dry_run))
+        for record in list_profiles(paths)
+    ]
+
+
+# Profile migration (legacy ``fallback_models`` -> canonical ``models``
+# chains); allow: SIZE_OK — plan-pinned single-module engine.
+
+
+@dataclass(frozen=True)
+class MigrateResult:
+    """Immutable result of one profile-migration operation.
+
+    ``routes`` is the number of legacy routes converted (from
+    :func:`transform.migrate_document`); ``rerendered`` is True only
+    when the ACTIVE profile's live ``omo.jsonc`` was rewritten.
+    """
+
+    status: UseStatus
+    profile: str
+    routes: int = 0
+    message: str = ""
+    error: str | None = None
+    rerendered: bool = False
+
+
+def migrate_profile(paths: Paths, name: str, *,
+                    dry_run: bool = False) -> MigrateResult:
+    """Convert stored profile ``name`` to canonical chains; module doc."""
+
+    def result(status: UseStatus, routes: int = 0, message: str = "",
+               error: str | None = None,
+               rerendered: bool = False) -> MigrateResult:
+        return MigrateResult(status=status, profile=name, routes=routes,
+                             message=message, error=error,
+                             rerendered=rerendered)
+
+    try:
+        record = read_profile(paths, name)
+    except InvalidProfileName as exc:
+        return result(UseStatus.BLOCKED, message=str(exc))
+    except ProfileNotFoundError:
+        return result(UseStatus.BLOCKED,
+                      message=f"Profile '{name}' not found")
+
+    if not record.is_valid or record.document is None:
+        return result(
+            UseStatus.BLOCKED,
+            message=f"Cannot migrate invalid profile: {name}: "
+                    f"{record.error}",
+            error=record.error,
+        )
+
+    migrated_doc, routes = migrate_document(record.document.raw)
+    if routes == 0:
+        return result(
+            UseStatus.NO_MATCHES,
+            message=f"No migration needed for profile '{name}'",
+        )
+    if dry_run:
+        return result(
+            UseStatus.PREVIEW, routes,
+            f"Would migrate profile '{name}' ({routes} route(s))",
+        )
+
+    try:
+        write_profile(paths, name, migrated_doc, overwrite=True)
+    except Exception as exc:
+        return result(UseStatus.FAILED, routes, str(exc), error=str(exc))
+
+    message = f"Migrated profile '{name}' ({routes} route(s))"
+    rerendered = False
+    if read_active(paths) == name:
+        rerender = use_profile(paths, name)
+        if rerender.status == UseStatus.APPLIED:
+            rerendered = True
+            message += "; re-rendered active configuration"
+        elif rerender.status == UseStatus.FAILED:
+            message += f"; re-render failed: {rerender.error}"
+    return result(UseStatus.APPLIED, routes, message,
+                  rerendered=rerendered)
+
+
+def migrate_all(paths: Paths, *,
+                dry_run: bool = False) -> list[tuple[str, MigrateResult]]:
+    """Migrate every stored profile, ``list_profiles`` order.
+
+    Invalid profiles surface as their BLOCKED result (skip-and-report);
+    never raises for per-profile failures.
+    """
+    return [
+        (record.name,
+         migrate_profile(paths, record.name, dry_run=dry_run))
         for record in list_profiles(paths)
     ]

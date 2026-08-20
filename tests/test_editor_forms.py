@@ -317,8 +317,7 @@ class ApplyEntryFormTests(unittest.TestCase):
         result = apply_entry_form(item, 0, form)
         self.assertEqual(result, OperationResult(True, "Entry saved"))
         self.assertEqual(form.error, "")
-        self.assertEqual(item.block, {"model": "m1",
-                                      "fallback_models": []})
+        self.assertEqual(item.block, {"models": ["m1"]})
 
     def test_agent_collapse_only_model_dict_to_string(self):
         item = RouteItem("agent", "a", {"model": "m0",
@@ -327,16 +326,14 @@ class ApplyEntryFormTests(unittest.TestCase):
         set_value(form, "model", "p9")
         result = apply_entry_form(item, 0, form)
         self.assertEqual(result, OperationResult(True, "Entry saved"))
-        self.assertEqual(item.block, {"model": "p9",
-                                      "fallback_models": ["m1"]})
+        self.assertEqual(item.block, {"models": ["p9", "m1"]})
 
     def test_agent_with_reasoning_stays_dict(self):
         item = RouteItem("agent", "a", {"model": "m0"}, None)
         form = build_entry_form({"model": "p9", "reasoning": "max"})
         apply_entry_form(item, 0, form)
-        self.assertEqual(item.block, {
-            "model": {"model": "p9", "reasoning": "max"},
-            "fallback_models": []})
+        self.assertEqual(item.block,
+                         {"models": [{"model": "p9", "reasoning": "max"}]})
 
     def test_category_never_collapses_only_model_dict(self):
         item = RouteItem("category", "c",
@@ -366,14 +363,24 @@ class ApplyEntryFormTests(unittest.TestCase):
         set_value(form, "model", "m2")
         result = apply_entry_form(item, 2, form)   # index == len(chain)
         self.assertEqual(result, OperationResult(True, "Entry saved"))
-        self.assertEqual(item.block["fallback_models"], ["m1", "m2"])
+        self.assertEqual(item.block["models"], ["m0", "m1", "m2"])
 
     def test_custom_reasoning_round_trip_on_agent(self):
         item = RouteItem("agent", "a", {}, None)
         form = build_entry_form({"model": "m", "reasoning": "turbo"})
         apply_entry_form(item, 0, form)
-        self.assertEqual(item.block["model"],
-                         {"model": "m", "reasoning": "turbo"})
+        self.assertEqual(item.block["models"],
+                         [{"model": "m", "reasoning": "turbo"}])
+
+    def test_legacy_agent_save_via_form_writes_canonical_with_fold(self):
+        item = RouteItem("agent", "a", {"model": "m0", "reasoning": "max",
+                                        "fallback_models": ["m1"]}, None)
+        form = build_entry_form(chain_entries(item)[1])
+        set_value(form, "model", "m9")
+        result = apply_entry_form(item, 1, form)
+        self.assertEqual(result, OperationResult(True, "Entry saved"))
+        self.assertEqual(item.block, {"models": [
+            {"model": "m0", "reasoning": "max"}, "m9"]})
 
     def test_numbers_and_reasoning_written_only_when_present(self):
         item = RouteItem("category", "c", {"models": [{}]}, 1)

@@ -594,9 +594,10 @@ class EditCliTests(unittest.TestCase):
         from opencode_config_switcher.jsonc import loads
         out = _FakeTty()
         before = (self.profiles / "alpha.jsonc").read_text()
-        # Given a TTY edit session; When enter-route, "," moves the
-        # fallback over the primary and "S" saves; Then the store file
-        # is rewritten with the promoted fallback as the model.
+        # Given a TTY edit session on a legacy-form agent; When
+        # enter-route, "," moves the fallback over the primary and "S"
+        # saves; Then the store file is rewritten with a canonical
+        # models list (promoted fallback first).
         surface = _StubSurface(["\r", ",", "S"])
         with self._env(), \
                 mock.patch("sys.stdin", _FakeTty()), \
@@ -609,8 +610,34 @@ class EditCliTests(unittest.TestCase):
         after = (self.profiles / "alpha.jsonc").read_text()
         self.assertNotEqual(before, after)
         build = loads(after)["[opencode]"]["agents"]["build"]
-        self.assertEqual(build["model"], "provider/fb")
-        self.assertEqual(build["fallback_models"], ["provider/alpha"])
+        self.assertEqual(build, {"models": ["provider/fb",
+                                            "provider/alpha"]})
+
+    def test_tty_save_preserves_leading_comments(self):
+        from opencode_config_switcher import cli
+        from opencode_config_switcher.jsonc import loads
+        out = _FakeTty()
+        seed = ("// team choice\n// reviewed 2026\n"
+                + json.dumps({"[opencode]": {"agents": {
+                    "build": {"model": "provider/alpha",
+                              "fallback_models": ["provider/fb"]}}}},
+                    indent=2) + "\n")
+        (self.profiles / "beta.jsonc").write_text(seed, encoding="utf-8")
+        surface = _StubSurface(["\r", ",", "S"])
+        with self._env(), \
+                mock.patch("sys.stdin", _FakeTty()), \
+                mock.patch("sys.stdout", out), \
+                mock.patch("curses.wrapper",
+                           side_effect=lambda fn, *a: fn(surface, *a)):
+            code = cli.main(["edit", "beta"])
+        self.assertEqual(code, 0, out.getvalue())
+        after = (self.profiles / "beta.jsonc").read_text()
+        self.assertTrue(
+            after.startswith("// team choice\n// reviewed 2026\n\n"),
+            after)
+        build = loads(after)["[opencode]"]["agents"]["build"]
+        self.assertEqual(build, {"models": ["provider/fb",
+                                            "provider/alpha"]})
 
     def test_edit_listed_once_in_help(self):
         import re

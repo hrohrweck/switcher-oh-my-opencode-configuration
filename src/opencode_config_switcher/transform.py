@@ -25,9 +25,12 @@ Pipeline order (binding for Task 9 CLI import / Task 17 onboarding):
 6. ``_restructure_categories`` — ``{model, variant, fallback_models}`` →
    ``{models: [primary, *fallbacks]}``; the primary is a bare string when it
    carries no reasoning-ish settings, else ``{model, <settings>}``.
-7. :func:`normalize_model_entry` on every dict model-ref (agents: the route
-   dict and every dict ``fallback_models`` entry; categories: every dict
-   ``models`` entry).
+7. ``_restructure_agents`` — canonicalize agent ``fallback_models`` chains
+   using task-1 helpers (applies only to agents with ``fallback_models``;
+   model-only and model+models agents pass through untouched).
+8. :func:`normalize_model_entry` on every dict model-ref (agents: the route
+   dict — chain entries were already normalized in step 7; categories:
+   every dict ``models`` entry).
 
 Observed-pair asymmetry (the real migration output, which this transform
 reproduces byte-for-byte modulo ID sanitization): an AGENT fallback dict
@@ -49,8 +52,11 @@ __all__ = [
     "HOOK_NAME_MAP",
     "MODEL_VERSION_MAP",
     "bump_model_versions",
+    "canonicalize_definition",
+    "definition_needs_migration",
     "derive_profile_name",
     "discover_legacy",
+    "migrate_document",
     "normalize_model_entry",
     "remap_disabled",
     "rename_agents",
@@ -119,6 +125,15 @@ _DROP_KEYS = (
     "maxTokens", "providerOptions",
 )
 _METADATA_KEYS = ("$schema", "_migrations", "appliedMigrations")
+# Definition-level settings keys folded into the primary chain entry, then
+# stripped from the definition (OMO primaryModelRef / normalizeDefinition,
+# dist/cli-node/index.js:87418-87435 and 87478-87489).
+_DEFINITION_SETTINGS_KEYS = (
+    "reasoning", "variant", "reasoningEffort", "thinking",
+    "textVerbosity", "provider_options", "providerOptions",
+)
+_DEFINITION_STRIP_KEYS = ("model", "fallback_models",
+                          *_DEFINITION_SETTINGS_KEYS)
 
 
 def strip_metadata(raw: dict) -> dict:
@@ -272,6 +287,117 @@ def normalize_model_entry(entry: dict,
     return normalized, tuple(warnings)
 
 
+def _as_chain_list(value) -> list:
+    """OMO ``normalizedList`` shape: wrap non-list values, drop ``None``."""
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _canonical_chain_entry(entry):
+    """Normalize one chain entry; collapse ``{"model": ...}``-only dicts."""
+    if isinstance(entry, dict) and "model" in entry:
+        normalized, _warnings = normalize_model_entry(entry, ("models",))
+        return (normalized["model"]
+                if set(normalized) == {"model"} else normalized)
+    return entry
+
+
+def canonicalize_definition(block: dict, kind: str) -> dict:
+    """Fold ``model``(+settings) + ``fallback_models`` into canonical ``models``.
+
+    OMO parity (``normalizeDefinition`` dist/cli-node/index.js:87447-87491,
+    ``primaryModelRef`` 87418-87435): the chain is
+    ``[primary?, *existing, *fallbacks]`` where ``primary`` is the string
+    ``model`` folded with the definition-level settings keys
+    (``_DEFINITION_SETTINGS_KEYS``), ``existing`` is the prior ``models``
+    list (``kind == "agent"`` only — category ``models`` are replaced, never
+    carried over; OMO 87475), and every dict entry passes through
+    :func:`normalize_model_entry`.  Entries that normalize down to
+    ``{"model": ...}`` alone collapse to the bare model string (tool
+    convention, editor ``_collapse_agent_entry``).  ``model``,
+    ``fallback_models``, and all settings keys are deleted from the
+    definition level; every other key (``description``, ``tools``,
+    ``_comment`` …) is preserved verbatim.  Pure: blocks without
+    ``fallback_models`` are returned as an unchanged shallow copy and the
+    input is never mutated.
+    """
+    if "fallback_models" not in block:
+        return dict(block)
+    result = {key: value for key, value in block.items()
+              if key not in _DEFINITION_STRIP_KEYS}
+    chain: list = []
+    model = block.get("model")
+    if isinstance(model, str):
+        settings = {key: block[key]
+                    for key in _DEFINITION_SETTINGS_KEYS if key in block}
+        chain.append({"model": model, **settings} if settings else model)
+    if kind == "agent":
+        chain.extend(_as_chain_list(block.get("models")))
+    chain.extend(_as_chain_list(block.get("fallback_models")))
+    result["models"] = [_canonical_chain_entry(entry) for entry in chain]
+    return result
+
+
+def definition_needs_migration(block) -> bool:
+    """True iff ``block`` is a dict carrying the legacy ``fallback_models``."""
+    return isinstance(block, dict) and "fallback_models" in block
+
+
+def migrate_document(document: dict) -> tuple[dict, int]:
+    """Canonicalize every agent/category route under harness-shaped keys.
+
+    Harness-shaped keys match ``[...]`` (e.g. ``"[opencode]"``); within each
+    harness block the ``agents`` and ``categories`` dicts are rewritten via
+    :func:`canonicalize_definition`.  Returns ``(new_document, converted)``
+    where ``converted`` counts the routes that carried ``fallback_models``.
+    Non-harness keys and non-route keys (``model_fallback``,
+    ``runtime_fallback``, the catalog ``models`` mapping, ``_migrations`` …)
+    pass through untouched.  Pure: the input document is never mutated.
+    """
+    migrated = dict(document)
+    converted = 0
+    for key, value in document.items():
+        if not (key.startswith("[") and key.endswith("]")):
+            continue
+        if not isinstance(value, dict):
+            continue
+        block = dict(value)
+        for section, kind in (("agents", "agent"),
+                              ("categories", "category")):
+            routes = value.get(section)
+            if not isinstance(routes, dict):
+                continue
+            rebuilt: dict = {}
+            for name, route in routes.items():
+                if definition_needs_migration(route):
+                    rebuilt[name] = canonicalize_definition(route, kind)
+                    converted += 1
+                else:
+                    rebuilt[name] = route
+            block[section] = rebuilt
+        migrated[key] = block
+    return migrated, converted
+
+
+def _restructure_agents(config: dict) -> dict:
+    """Canonicalize agent ``fallback_models`` chains using task-1 helpers."""
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        return config
+    rebuilt: dict = {}
+    for name, agent in agents.items():
+        if not isinstance(agent, dict):
+            rebuilt[name] = agent
+            continue
+        # Only canonicalize agents that have fallback_models (task-1 semantics)
+        if not definition_needs_migration(agent):
+            rebuilt[name] = agent
+            continue
+        rebuilt[name] = canonicalize_definition(agent, "agent")
+    return {**config, "agents": rebuilt}
+
+
 def _restructure_categories(config: dict) -> dict:
     """Fold category ``model``(+settings) + ``fallback_models`` into ``models``."""
     categories = config.get("categories")
@@ -374,7 +500,11 @@ def transform_legacy(raw: dict) -> tuple[dict, tuple[str, ...]]:
     """Transform one legacy document into ``{"$schema", "[opencode]"}``.
 
     Non-dict ``raw`` yields ``({}, ("legacy document is not an object",))``.
-    The returned document never contains ``_migrations``.
+    Pipeline: steps 1-5, then ``_restructure_categories``, then
+    ``_restructure_agents`` (agent ``fallback_models`` routes fold into
+    canonical ``models`` chains).  The returned document never contains
+    ``_migrations`` and never carries ``fallback_models`` under any
+    ``agents`` block.
     """
     if not isinstance(raw, dict):
         return {}, ("legacy document is not an object",)
@@ -387,6 +517,7 @@ def transform_legacy(raw: dict) -> tuple[dict, tuple[str, ...]]:
     config = rename_keys(config)
     config = remap_disabled(config)
     config = _restructure_categories(config)
+    config = _restructure_agents(config)
     body, warnings = _normalize_entries(config)
     return {"$schema": OMO_SCHEMA_URL, "[opencode]": body}, warnings
 

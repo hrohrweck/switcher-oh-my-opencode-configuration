@@ -530,6 +530,20 @@ class DocumentModelTests(unittest.TestCase):
         self.assertEqual(route_entry_count(odd["badfb"]), 1)
         self.assertEqual(route_entry_count(odd["nomodels"]), 0)
 
+    def test_route_entry_count_agent_canonical_models(self):
+        doc = EditorDocument("x", {"[opencode]": {"agents": {
+            "can": {"models": ["a", "b"]},
+            "empty": {"models": []},
+            "mixed": {"model": "m", "fallback_models": ["f"],
+                      "models": ["c0", "c1", "c2"]},
+            "malformed": {"models": "oops", "model": "m"},
+        }}})
+        routes = {r.name: r for r in doc.routes()}
+        self.assertEqual(route_entry_count(routes["can"]), 2)
+        self.assertEqual(route_entry_count(routes["empty"]), 0)
+        self.assertEqual(route_entry_count(routes["mixed"]), 3)
+        self.assertEqual(route_entry_count(routes["malformed"]), 1)
+
 
 class ContractTests(unittest.TestCase):
     def test_state_transition_shape(self):

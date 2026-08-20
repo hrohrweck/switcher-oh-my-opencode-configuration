@@ -514,5 +514,45 @@ class AdversarialTests(TempHomeTestCase):
             (self.paths.profiles_dir / "alpha.jsonc").read_bytes(), v1)
 
 
+class LeadingCommentPreservationTests(TempHomeTestCase):
+    """write_profile(overwrite=True) re-emits a hand-authored leading block."""
+
+    def test_overwrite_re_emits_leading_comment_block_first(self):
+        self.paths.profiles_dir.mkdir(parents=True)
+        target = self.paths.profiles_dir / "alpha.jsonc"
+        body = jsonc_dumps(DOC_V1).split("\n", 1)[1]  # drop canonical header
+        target.write_text("// hand note\n// more\n\n" + body,
+                          encoding="utf-8")
+        write_profile(self.paths, "alpha", DOC_V2, overwrite=True)
+        text = target.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("// hand note\n// more\n\n{"),
+                        msg=text[:120])
+        # and the stored document is the NEW one (round-trips through loads)
+        record = read_profile(self.paths, "alpha")
+        self.assertTrue(record.is_valid)
+        self.assertEqual(record.document.raw, DOC_V2)
+
+    def test_overwrite_keeps_canonical_header_plus_user_block_once(self):
+        self.paths.profiles_dir.mkdir(parents=True)
+        target = self.paths.profiles_dir / "alpha.jsonc"
+        body = jsonc_dumps(DOC_V1).split("\n", 1)[1]
+        target.write_text("// OMO configuration\n// user note\n" + body,
+                          encoding="utf-8")
+        write_profile(self.paths, "alpha", DOC_V2, overwrite=True)
+        text = target.read_text(encoding="utf-8")
+        self.assertEqual(text.count("// OMO configuration"), 1)
+        self.assertTrue(
+            text.startswith("// OMO configuration\n// user note\n\n{"),
+            msg=text[:120])
+
+    def test_overwrite_of_tool_written_file_stays_byte_identical(self):
+        create_profile(self.paths, "alpha", from_document=DOC_V1)
+        write_profile(self.paths, "alpha", DOC_V2, overwrite=True)
+        self.assertEqual(
+            (self.paths.profiles_dir / "alpha.jsonc").read_text(
+                encoding="utf-8"),
+            jsonc_dumps(DOC_V2))
+
+
 if __name__ == "__main__":
     unittest.main()
