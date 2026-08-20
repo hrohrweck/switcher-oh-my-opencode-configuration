@@ -832,7 +832,7 @@ def run_tui_selector(summaries,
         return TuiHandleOutcome.QUIT
     if result.outcome in (TuiOutcome.APPLIED, TuiOutcome.NOOP):
         return TuiHandleResult(
-            TuiHandleOutcome(result.outcome.value), result.apply_result)
+            TuiHandleOutcome[result.outcome.name], result.apply_result)
     return TuiHandleResult(TuiHandleOutcome.QUIT)
 
 

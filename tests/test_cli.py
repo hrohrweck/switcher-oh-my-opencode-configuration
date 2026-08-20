@@ -18,12 +18,14 @@ from pathlib import Path
 from unittest import mock
 
 from opencode_config_switcher import __version__, cli
+from opencode_config_switcher.engine import UseResult, UseStatus
 from opencode_config_switcher.engine import render_document, use_profile
 from opencode_config_switcher.jsonc import dumps as jsonc_dumps
 from opencode_config_switcher.jsonc import loads as jsonc_loads
 from opencode_config_switcher.omoconfig import OmoDocument
 from opencode_config_switcher.paths import Paths
 from opencode_config_switcher.transform import transform_legacy
+from opencode_config_switcher.tui import TuiOutcome, TuiResult
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 PY = sys.executable
@@ -374,6 +376,39 @@ class TtyDispatchTests(unittest.TestCase):
         self.assertEqual(len(recorded["summaries"]), 1)
         self.assertEqual(recorded["summaries"][0].record.name, "alpha")
         self.assertEqual(recorded["paths"], Paths.build(home))
+
+    def test_tty_selector_noop_exits_cleanly(self):
+        """Regression for the TuiOutcome.NOOP -> TuiHandleOutcome conversion.
+
+        Exiting the selector without changing the active profile used to
+        raise ``ValueError: 'NOOP' is not a valid TuiHandleOutcome`` because
+        the code constructed the enum from the string value rather than the
+        member name.
+        """
+        with _home_with({"alpha": ALPHA_TEXT},
+                        active="alpha", omo_text=LIVE_TEXT) as home:
+            fake_out = _FakeTty()
+            noop_result = TuiResult(
+                outcome=TuiOutcome.NOOP,
+                apply_result=UseResult(
+                    status=UseStatus.NOOP,
+                    profile="alpha",
+                    omo_path=Paths.build(home).omo_path,
+                    backup=Paths.build(home).omo_backup,
+                    message=("No change: profile 'alpha' is already active"),
+                ),
+            )
+            with mock.patch("sys.stdin", _FakeTty("")), \
+                    mock.patch("sys.stdout", fake_out), \
+                    mock.patch("opencode_config_switcher.tui.run_profile_tui",
+                               return_value=noop_result), \
+                    mock.patch.dict(os.environ,
+                                    {"TERM": "xterm-256color",
+                                     "HOME": str(home)}):
+                code = cli.main([])
+        self.assertEqual(code, 0)
+        self.assertIn("No change: profile 'alpha' is already active",
+                      fake_out.getvalue())
 
     def test_term_dumb_forces_plain_even_with_tty_streams(self):
         with _home_with({"alpha": ALPHA_TEXT}) as home:
