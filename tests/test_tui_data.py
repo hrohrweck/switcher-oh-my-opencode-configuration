@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from opencode_config_switcher.config import RouteSummary
+from opencode_config_switcher.config import ModelSpec, RouteSummary
 from opencode_config_switcher.jsonc import dumps as jsonc_dumps
 from opencode_config_switcher.omoconfig import (
     OMO_SCHEMA_URL,
@@ -514,6 +514,48 @@ class FormatDetailsEdgeTests(TempHomeTestCase):
         self.assertEqual(
             sum("entries in models list" in line for line in lines), 1)
         self.assertIn("  strmodels: solo", lines)
+
+    def test_canonical_agent_primary_line_fallback_list_and_count(self):
+        doc = {"$schema": OMO_SCHEMA_URL, "[opencode]": {"agents": {
+            "sisyphus": {"models": [{"model": "p/m", "reasoning": "max"},
+                                    "a/b"]}}}}
+        summary = build_summaries(
+            self.paths, [_record("canon", OmoDocument(raw=doc))])[0]
+        agent = summary.agents[0]
+        self.assertEqual(agent.models_list_len, 2)
+        self.assertEqual(agent.route.primary,
+                         ModelSpec(model="p/m", reasoning="max"))
+        self.assertEqual(agent.route.fallbacks,
+                         (ModelSpec(model="a/b"),))
+        lines = format_details(summary, 80)
+        start = lines.index("Agents (1):")
+        self.assertEqual(lines[start:start + 5], [
+            "Agents (1):",
+            "  sisyphus: p/m",
+            "    primary: reasoning=max",
+            "    fallbacks:",
+            "      1. a/b",
+        ])
+        self.assertIn("    (2 entries in models list)", lines)
+
+    def test_canonical_agent_fallback_entry_renders_extras_suffix(self):
+        doc = {"$schema": OMO_SCHEMA_URL, "[opencode]": {"agents": {
+            "metis": {"models": [
+                {"model": "p/m", "variant": "big"},
+                {"model": "a/b", "reasoning": "low",
+                 "reasoningEffort": "xhigh"},
+            ]}}}}
+        summary = build_summaries(
+            self.paths, [_record("canon2", OmoDocument(raw=doc))])[0]
+        lines = format_details(summary, 80)
+        start = lines.index("Agents (1):")
+        self.assertEqual(lines[start:start + 5], [
+            "Agents (1):",
+            "  metis: p/m",
+            "    primary: variant=big",
+            "    fallbacks:",
+            "      1. a/b (reasoning=low, effort=xhigh)",
+        ])
 
     def test_primary_variant_and_effort_parts(self):
         doc = {"$schema": OMO_SCHEMA_URL, "[opencode]": {"agents": {

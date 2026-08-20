@@ -389,5 +389,63 @@ class SummarizeRoutesTests(unittest.TestCase):
         self.assertEqual(categories, ())
 
 
+class CanonicalAgentFormBTests(unittest.TestCase):
+    def test_object_primary_with_reasoning_and_string_fallback(self):
+        agents, _ = summarize_routes({"agents": {"sisyphus": {
+            "models": [{"model": "p/m", "reasoning": "max"}, "a/b"]}}})
+        self.assertEqual(agents, (
+            RouteSummary(
+                name="sisyphus",
+                primary=ModelSpec(model="p/m", reasoning="max"),
+                fallbacks=(ModelSpec(model="a/b"),),
+                warnings=(),
+            ),
+        ))
+
+    def test_object_primary_keeps_variant_and_effort(self):
+        agents, _ = summarize_routes({"agents": {"atlas": {
+            "models": [
+                {"model": "p/m", "variant": "big",
+                 "reasoningEffort": "high"},
+                {"model": "f/1", "reasoning": "low"},
+                "f/2",
+            ]}}})
+        self.assertEqual(agents, (
+            RouteSummary(
+                name="atlas",
+                primary=ModelSpec(model="p/m", variant="big",
+                                  reasoning_effort="high"),
+                fallbacks=(ModelSpec(model="f/1", reasoning="low"),
+                           ModelSpec(model="f/2")),
+                warnings=(),
+            ),
+        ))
+
+    def test_single_string_entry_is_primary_without_fallbacks(self):
+        agents, _ = summarize_routes({"agents": {"solo": {
+            "models": ["only/m"]}}})
+        self.assertEqual(agents, (
+            RouteSummary(
+                name="solo",
+                primary=ModelSpec(model="only/m"),
+                fallbacks=(),
+                warnings=(),
+            ),
+        ))
+
+    def test_legacy_fallback_models_append_after_models_chain(self):
+        agents, _ = summarize_routes({"agents": {"metis": {
+            "models": ["m1", "m2"],
+            "fallback_models": ["f1"]}}})
+        self.assertEqual(agents, (
+            RouteSummary(
+                name="metis",
+                primary=ModelSpec(model="m1"),
+                fallbacks=(ModelSpec(model="m2"), ModelSpec(model="f1")),
+                warnings=(),
+            ),
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()
