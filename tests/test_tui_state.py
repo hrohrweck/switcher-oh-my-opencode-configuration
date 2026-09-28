@@ -10,7 +10,8 @@ from unittest import mock
 
 import opencode_config_switcher.tui as tui_mod
 from opencode_config_switcher.tui import (
-    AppState, LayoutMode, NarrowPane, compute_layout, handle_key,
+    AppState, LayoutMode, NarrowPane, compose_footer, compute_layout,
+    handle_key,
     )
 
 
@@ -311,6 +312,57 @@ class EditorFlagTests(unittest.TestCase):
 
     def test_flag_defaults_true(self):
         self.assertTrue(tui_mod.EDITOR_AVAILABLE)
+
+
+class ScopePromptStateTests(unittest.TestCase):
+    """The scope prompt rides the generic prompt machinery."""
+
+    def _scope(self, buffer=""):
+        return AppState(config_count=2, layout=LayoutMode.WIDE,
+                        prompt="scope",
+                        prompt_label=tui_mod.SCOPE_PROMPT_LABEL,
+                        prompt_buffer=buffer)
+
+    def test_label_constant(self):
+        self.assertEqual(tui_mod.SCOPE_PROMPT_LABEL,
+                         "Apply locally (l) or globally (g)? ")
+
+    def test_printable_keys_capture_into_buffer(self):
+        s = self._scope()
+        for ch in "lg":
+            self.assertIsNone(handle_key(s, ch))
+        self.assertEqual(s.prompt_buffer, "lg")
+
+    def test_enter_returns_prompt_submit_keeping_state(self):
+        s = self._scope("l")
+        self.assertEqual(handle_key(s, "enter"), "prompt_submit")
+        self.assertEqual(s.prompt, "scope")
+        self.assertEqual(s.prompt_buffer, "l")
+
+    def test_backspace_edits_buffer(self):
+        s = self._scope("g")
+        handle_key(s, "backspace")
+        self.assertEqual(s.prompt_buffer, "")
+
+    def test_esc_cancels_without_residue(self):
+        s = self._scope("x")
+        self.assertIsNone(handle_key(s, "esc"))
+        self.assertIsNone(s.prompt)
+        self.assertEqual(s.prompt_buffer, "")
+        self.assertEqual(s.prompt_label, "")
+
+    def test_ctrlc_and_ctrld_cancel_too(self):
+        for key in ("ctrlc", "ctrld"):
+            with self.subTest(key=key):
+                s = self._scope("l")
+                self.assertIsNone(handle_key(s, key))
+                self.assertIsNone(s.prompt)
+                self.assertEqual(s.prompt_buffer, "")
+
+    def test_footer_shows_scope_label_and_buffer(self):
+        s = self._scope("l")
+        self.assertEqual(compose_footer(s),
+                         "Apply locally (l) or globally (g)? l")
 
 
 if __name__ == "__main__":

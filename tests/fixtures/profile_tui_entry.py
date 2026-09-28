@@ -22,7 +22,7 @@ from pathlib import Path
 
 from opencode_config_switcher.engine import use_profile
 from opencode_config_switcher.omoconfig import OMO_SCHEMA_URL
-from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.paths import ApplyScope, Paths
 from opencode_config_switcher.profiles import (
     create_profile,
     delete_profile,
@@ -68,12 +68,13 @@ def main() -> int:
     def refresh():
         return build_summaries(paths, list_profiles(paths))
 
-    def failing_use(name):
+    def failing_use(name, scope=ApplyScope.GLOBAL):
         raise RuntimeError("injected use failure")
 
     services = SelectorServices(
         use_fn=(failing_use if mode == "fail-apply"
-                else lambda name: use_profile(paths, name)),
+                else lambda name, scope=ApplyScope.GLOBAL:
+                    use_profile(paths, name, scope=scope)),
         create_fn=lambda name: create_profile(paths, name),
         delete_fn=lambda name: delete_profile(paths, name),
         refresh_fn=refresh,

@@ -67,7 +67,10 @@ class ProfileTuiPtyTests(unittest.TestCase):
         try:
             h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
             h.send(b"\x1bOB")  # Down (application-mode SS3 form) → beta
-            h.send(b"\r")      # Enter → use and exit
+            h.send(b"\r")      # Enter → scope prompt
+            h.wait_for(b"Apply locally (l) or globally (g)? ",
+                       timeout=10)
+            h.send(b"g\r")     # global → use and exit
             self.assertEqual(h.wait_exit(timeout=10), 0)
             self.assertIn(b"TUI-EXIT:APPLIED", h.output)
             self.assertIn(b"TUI-USE:APPLIED:Profile applied: beta",
@@ -83,7 +86,10 @@ class ProfileTuiPtyTests(unittest.TestCase):
         h = self._spawn(self.home, rows=40, cols=120, mode="noop-seed")
         try:
             h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
-            h.send(b"\r")  # alpha is active+managed → NOOP exit
+            h.send(b"\r")  # Enter → scope prompt
+            h.wait_for(b"Apply locally (l) or globally (g)? ",
+                       timeout=10)
+            h.send(b"g\r")  # alpha is active+managed → NOOP exit
             self.assertEqual(h.wait_exit(timeout=10), 0)
             self.assertIn(b"TUI-EXIT:NOOP", h.output)
             self.assertIn(
@@ -165,8 +171,15 @@ class ProfileTuiPtyTests(unittest.TestCase):
             h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
             h.send(b"\x1bOB")  # Down → beta (selection to preserve)
             h.resize(rows=40, cols=120)
-            h.wait_for(b" Profiles", timeout=5)  # WIDE redraw happened
-            h.send(b"\r")
+            # " Profiles" is the WIDE-only header; the selector's
+            # 250ms poll resyncs even a dropped SIGWINCH, so the WIDE
+            # frame lands within a second under load (timeout=10 for
+            # headroom).
+            h.wait_for(b" Profiles", timeout=10)
+            h.send(b"\r")  # Enter → scope prompt
+            h.wait_for(b"Apply locally (l) or globally (g)? ",
+                       timeout=10)
+            h.send(b"g\r")  # global → use and exit
             self.assertEqual(h.wait_exit(timeout=10), 0)
             self.assertIn(b"TUI-USE:APPLIED:Profile applied: beta",
                           h.output)
@@ -220,7 +233,10 @@ class ProfileTuiPtyTests(unittest.TestCase):
         h = self._spawn(self.home, rows=24, cols=80, mode="fail-apply")
         try:
             h.wait_for(b"OpenCode Configuration Switcher", timeout=10)
-            h.send(b"\r")  # use_fn raises → FATAL, terminal restored
+            h.send(b"\r")  # Enter → scope prompt
+            h.wait_for(b"Apply locally (l) or globally (g)? ",
+                       timeout=10)
+            h.send(b"g\r")  # use_fn raises → FATAL, terminal restored
             self.assertEqual(h.wait_exit(timeout=5), 1)
             self.assertIn(b"TUI-EXIT:FATAL", h.output)
         finally:

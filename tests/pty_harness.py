@@ -102,10 +102,30 @@ class PtyHarness:
         """Block until *marker* appears in output; raise on timeout."""
         idx = self.collect_until(marker, timeout)
         if idx < 0:
-            tail = bytes(self._output[-200:])
+            tail = bytes(self._output[-3000:])
             raise TimeoutError(
                 f"Marker {marker!r} not found within {timeout}s. "
+                f"Child status: {self._poll_status()}. "
                 f"Output tail: {tail!r}")
+
+    def _poll_status(self) -> str:
+        """Reap-if-dead child state for timeout diagnostics."""
+        if self._child_pid is None:
+            return f"reaped({self._exit_status})"
+        try:
+            pid, status = os.waitpid(self._child_pid, os.WNOHANG)
+        except OSError as exc:
+            return f"waitpid-error({exc})"
+        if pid == 0:
+            return "alive"
+        self._child_pid = None
+        if os.WIFEXITED(status):
+            self._exit_status = os.WEXITSTATUS(status)
+            return f"exited({self._exit_status})"
+        if os.WIFSIGNALED(status):
+            self._exit_status = -os.WTERMSIG(status)
+            return f"signaled({-self._exit_status})"
+        return f"unparsed-wait-status({status})"
 
     # ── window resize ───────────────────────────────────────────────
 
