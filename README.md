@@ -1,4 +1,4 @@
-# OpenCode Configuration Switcher v3.1.0 — Profile-Based omo.jsonc Switcher
+# OpenCode Configuration Switcher v3.2.0 — Profile-Based omo.jsonc Switcher
 
 A command-line toolkit that manages named configuration profiles under `~/.omo/profiles/` and renders the selected profile into `~/.omo/omo.jsonc`, the configuration read by oh-my-opencode / oh-my-openagent. Switching is render-on-select: profiles are stored documents, the live file is generated from them, and nothing in your legacy `~/.config/opencode/` directory is ever modified.
 
@@ -94,16 +94,37 @@ Prints `Active profile: <name>` when the marker matches and the live `omo.jsonc`
 opencode-config-switcher active
 ```
 
-### `use` / `select`: apply a profile to `~/.omo/omo.jsonc`
+### `use` / `select`: apply a profile locally or globally
 
-Renders the named profile into the live file (backing up the previous one first) and records it in `.active`. `select` is a full alias of `use`; `opencode-config-switcher select work` behaves identically. Called without a name, `use` launches the bare selector. On success:
+Renders the named profile into the live configuration and records it in `.active` (global applies). `select` is a full alias of `use`; `opencode-config-switcher select work` behaves identically. Called without a name, `use` launches the bare selector.
+
+Two mutually exclusive flags choose the apply scope:
+
+- `--global`: write `~/.omo/omo.jsonc` (the default; piped/non-TTY runs always apply globally, no scope prompt)
+- `--local`: write `<cwd>/.omo/omo.jsonc`, the project-local override (see *Local vs global apply* below)
+- The scope flags require a profile name: bare `use --local` or `use --global` is a usage error, exit 2
+
+On an interactive terminal with neither flag, the tool asks before applying:
+
+    Apply locally for the current project (.omo/omo.jsonc) or globally (~/.omo/omo.jsonc)? [l/g]:
+
+Answer `l` or `g`. Any other answer prints `Invalid selection: '<x>'; expected l or g` and exits 2 without writing; EOF or Ctrl-C prints `Exiting without changes` and exits 0, also without writing.
+
+On success:
 
     Profile applied: work
+    Applied to: /home/you/.omo/omo.jsonc
     Backup saved to: /home/you/.omo/omo.jsonc.BAK
+
+The `Backup saved to:` line appears only when the previous live file was actually copied to `.BAK`; a fresh first apply (nothing on disk to overwrite yet) stops after `Applied to:`.
 
 ```bash
 opencode-config-switcher use work
 ```
+
+#### Local vs global apply
+
+The local target is `<cwd>/.omo/omo.jsonc`. Upstream (oh-my-openagent) resolves configuration nearest-wins, walking from the current directory up to `$HOME`, so a project-local file overrides the global one inside that project. A local apply is write-only: it never touches `~/.omo/profiles/.active`, so `list`, `active`, and drift detection keep describing the global scope only. Running `use --local` from `$HOME` writes the global file without updating `.active` for the same reason. Local applies are never no-ops: re-applying always rewrites the local file, creating `<cwd>/.omo/omo.jsonc.BAK` when a previous local file existed.
 
 ### `create`: create a new profile
 
@@ -182,15 +203,15 @@ Running `opencode-config-switcher` with no subcommand opens the full-screen prof
 | **WIDE** (100+ cols, 18+ rows) | Up / Down | Select profile |
 | | PageUp / PageDown | Scroll details panel |
 | | `d` | Toggle raw JSON / structured details |
-| | Enter | Apply selected profile and exit |
+| | Enter | Open the inline scope choice (`l`/`g`) for the selected profile |
 | **NARROW** (Menu pane) | Up / Down | Select profile |
 | | Tab | Switch to Details pane |
 | | `d` | Toggle raw view (switches to Details) |
-| | Enter | Apply selected profile and exit |
+| | Enter | Open the inline scope choice (`l`/`g`) for the selected profile |
 | **NARROW** (Details pane) | Up / Down / PageUp / PageDown | Scroll details |
 | | Tab | Switch back to Menu pane |
 | | `d` | Toggle raw JSON / structured details |
-| | Enter | Apply selected profile and exit |
+| | Enter | Open the inline scope choice (`l`/`g`) for the selected profile |
 | **TOO SMALL** (<40 cols or <12 rows) | q / Ctrl-C / Ctrl-D | Quit (all other keys ignored) |
 | **All layouts** | q / Ctrl-C / Ctrl-D | Quit without changes |
 | | `n` | New profile (inline name prompt) |
@@ -203,7 +224,7 @@ Running `opencode-config-switcher` with no subcommand opens the full-screen prof
 | | Enter | Submit the prompt |
 | | Esc / Ctrl-C / Ctrl-D | Cancel the prompt |
 
-After an apply, the TUI exits and the CLI prints `Profile applied:` and `Backup saved to:`. Blocked applies keep the selector open with the engine message in the footer.
+Enter on a profile now opens an inline scope choice before applying: `l` targets `<cwd>/.omo/omo.jsonc`, `g` targets `~/.omo/omo.jsonc`; Enter submits the choice, Esc cancels, and any non-`l`/`g` answer re-prompts without applying. After an apply the TUI exits and the CLI prints `Profile applied:`, then `Applied to:`, then `Backup saved to:` only when the previous live file was actually backed up. Blocked applies keep the selector open with the engine message in the footer.
 
 Two in-selector modals:
 
@@ -260,17 +281,18 @@ Validation on save: `temperature` must be within 0..2, `top_p` within 0..1, `max
 
 ## Plain Mode (piped / non-TTY)
 
-Without a TTY the bare invocation prints a numbered list and reads one input line:
+Without a TTY the bare invocation prints a numbered list and reads one input line (piped runs always apply globally; no scope prompt is shown):
 
     Available profiles:
       1) default [active]
       2) work
     Select 1-2 or q: 2
     Profile applied: work
+    Applied to: /home/you/.omo/omo.jsonc
     Backup saved to: /home/you/.omo/omo.jsonc.BAK
 
 - `q` or EOF: prints `Exiting without changes`, exit 0
-- Valid number: apply, prints `Profile applied:` and `Backup saved to:`, exit 0
+- Valid number: applies globally and prints `Profile applied:` and `Applied to:`, plus `Backup saved to:` when the previous live file was backed up, exit 0
 - Applying the already-active unchanged profile is a no-op (message only), exit 0
 - Invalid or out-of-range input: error to stderr, exit 2
 - Blocked apply (invalid profile, write failure): error to stderr, exit 2 or 1
@@ -317,7 +339,13 @@ v2 switched files inside `~/.config/opencode/` by copying one `oh-my-*.json` pre
 
 ## Version History
 
-- **v3.1.0** (Current):
+- **v3.2.0** (Current):
+  - Local/global apply scope: `use`/`select` accept mutually exclusive `--local`/`--global` (a profile name is required with the flags); an interactive run without a flag asks `l` or `g`, the TUI opens an inline scope choice on Enter, and piped runs apply globally
+  - Project-local target `<cwd>/.omo/omo.jsonc`, write-only: upstream resolves it over the global file nearest-wins, local applies merge over the local file, never no-op, and never touch the `.active` marker or drift detection
+  - Truthful apply output: `Applied to:` always names the written file and `Backup saved to:` is omitted on fresh applies (no previous file to back up)
+  - Selector resize robustness: redraws are poll-driven (250 ms timeout plus a terminal-size poll with resync), so a lost SIGWINCH no longer freezes the layout
+
+- **v3.1.0**:
   - Canonical `models` chains: agent routes stored in oh-my-openagent's `models` format across engine, editor, TUI, and import paths
   - `migrate` subcommand: convert pre-3.1 profile stores (bare = all profiles, `--profile NAME`, `--dry-run` previews)
   - Leading-comment preservation on every profile write (editor save, replace-model, migrate, import)
