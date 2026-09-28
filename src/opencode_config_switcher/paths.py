@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
-__all__ = ["Paths", "DEFAULT"]
+__all__ = ["ApplyScope", "Paths", "project_omo_paths", "DEFAULT"]
+
+
+class ApplyScope(str, Enum):
+    """Target of a profile apply: the user's home or a project folder."""
+
+    GLOBAL = "GLOBAL"
+    LOCAL = "LOCAL"
+
+
+def project_omo_paths(cwd: Path) -> tuple[Path, Path]:
+    """Project-scoped ``omo.jsonc`` and its ``.BAK`` under ``cwd``."""
+    omo_path = cwd / ".omo" / "omo.jsonc"
+    return omo_path, omo_path.with_name(omo_path.name + ".BAK")
 
 
 @dataclass(frozen=True)

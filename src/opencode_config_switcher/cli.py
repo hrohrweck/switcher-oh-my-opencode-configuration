@@ -29,7 +29,7 @@ from opencode_config_switcher.engine import (
     replace_model_in_profile,
     use_profile,
 )
-from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.paths import ApplyScope, Paths
 from opencode_config_switcher.profiles import (
     InvalidProfileName,
     ProfileExistsError,
@@ -58,6 +58,10 @@ ONBOARDING_CURRENT_LABEL = (
     "Import current ~/.omo/omo.jsonc as profile 'current'")
 ONBOARDING_LEGACY_LABEL = "Import legacy configuration files"
 ONBOARDING_SKIP_LABEL = "Skip"
+
+SCOPE_PROMPT_LABEL = (
+    "Apply locally for the current project (.omo/omo.jsonc) "
+    "or globally (~/.omo/omo.jsonc)? [l/g]: ")
 
 
 class _Parser(argparse.ArgumentParser):
@@ -102,6 +106,12 @@ def _build_parser() -> _Parser:
         picker = sub.add_parser(command, parents=[_VERSION_PARENT],
                                 help=help_text)
         picker.add_argument("name", nargs="?", help="profile name")
+        scope = picker.add_mutually_exclusive_group()
+        scope.add_argument("--local", dest="local", action="store_true",
+                           help="apply to the project's .omo/omo.jsonc "
+                                "in the current directory")
+        scope.add_argument("--global", dest="global_", action="store_true",
+                           help="apply to ~/.omo/omo.jsonc (the default)")
     create = sub.add_parser("create", parents=[_VERSION_PARENT],
                             help="create a new profile")
     create.add_argument("name", help="new profile name")
@@ -229,14 +239,50 @@ def _cmd_active(paths: Paths, args: argparse.Namespace) -> int:
 
 def _cmd_use(paths: Paths, args: argparse.Namespace) -> int:
     if args.name is None:
+        if args.local or args.global_:
+            print("--local/--global require a profile name",
+                  file=sys.stderr)
+            return 2
         return _run_bare(paths)
-    return _report_use_result(use_profile(paths, args.name))
+    scope = _resolve_apply_scope(args)
+    if isinstance(scope, int):
+        return scope
+    return _report_use_result(use_profile(paths, args.name, scope=scope))
+
+
+def _resolve_apply_scope(args: argparse.Namespace) -> ApplyScope | int:
+    """Explicit flag wins; otherwise a TTY prompts, non-TTY is GLOBAL.
+
+    Returns the :class:`ApplyScope` to apply, or an exit code for a
+    declined or invalid prompt answer (0 EOF/interrupt, 2 invalid
+    input — both leave every file untouched).
+    """
+    if args.local:
+        return ApplyScope.LOCAL
+    if args.global_:
+        return ApplyScope.GLOBAL
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return ApplyScope.GLOBAL
+    try:
+        answer = input(SCOPE_PROMPT_LABEL).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("Exiting without changes")
+        return 0
+    if answer in ("l", "L"):
+        return ApplyScope.LOCAL
+    if answer in ("g", "G", ""):
+        return ApplyScope.GLOBAL
+    print(f"Invalid selection: {answer!r}; expected l or g",
+          file=sys.stderr)
+    return 2
 
 
 def _report_use_result(result: UseResult) -> int:
     if result.status == UseStatus.APPLIED:
         print(result.message)
-        print(f"Backup saved to: {result.backup}")
+        print(f"Applied to: {result.omo_path}")
+        if result.backup is not None:
+            print(f"Backup saved to: {result.backup}")
         return 0
     if result.status == UseStatus.NOOP:
         print(result.message)
@@ -758,18 +804,7 @@ def _plain_selector(paths: Paths, records: list[ProfileRecord]) -> int:
         return 2
 
     result = use_profile(paths, records[number - 1].name)
-    if result.status == UseStatus.APPLIED:
-        print(result.message)
-        print(f"Backup saved to: {result.backup}")
-        return 0
-    if result.status == UseStatus.NOOP:
-        print(result.message)
-        return 0
-    if result.status == UseStatus.BLOCKED:
-        print(result.message, file=sys.stderr)
-        return 2
-    print(result.message, file=sys.stderr)
-    return 1
+    return _report_use_result(result)
 
 
 # ── interactive (TTY) selector adapter ─────────────────────────────
@@ -826,6 +861,9 @@ def build_selector_services(paths: Paths):
     ``edit_fn`` re-reads the profile FRESH each call; ``replace_fn``
     targets one profile by name or every profile when the name is
     ``None``; ``import_fn`` discovers legacy files read-only.
+    ``use_fn`` takes an optional scope defaulting GLOBAL so tui.py's
+    current one-arg ``use_fn(name)`` call site keeps working until the
+    TUI passes the scope explicitly.
     """
     from opencode_config_switcher.editor import (
         EditorOutcome, EditorResult)
@@ -861,7 +899,8 @@ def build_selector_services(paths: Paths):
         ]
 
     return SelectorServices(
-        use_fn=lambda name: use_profile(paths, name),
+        use_fn=lambda name, scope=ApplyScope.GLOBAL: use_profile(
+            paths, name, scope=scope),
         create_fn=lambda name: create_profile(paths, name),
         delete_fn=lambda name: delete_profile(paths, name),
         refresh_fn=lambda: _build_summaries(paths),

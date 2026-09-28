@@ -14,11 +14,13 @@ Contracts (Task 16 as built; binding for Tasks 17/18):
 - ``run_profile_tui(summaries, paths, services) -> TuiResult`` —
   ``paths`` is carried for the import screen (``paths.legacy_dir`` in
   its empty message) and the ``import_fn(paths)`` call; every mutating
-  action goes through ``services``.  Enter calls ``services.use_fn(name)``:
+  action goes through ``services``.  Enter opens the inline scope
+  prompt; submitting ``l``/``L`` (local) or ``g``/``G``/empty (global)
+  calls ``services.use_fn(name, scope)``:
   APPLIED/NOOP exit the TUI returning a :class:`TuiResult` whose
   ``apply_result`` carries the engine :class:`UseResult` (the CLI owns
   all post-curses printing); BLOCKED/FAILED keep the TUI interactive
-  with ``result.message`` in the footer.
+  with ``result.message`` in the footer; any other value re-prompts.
 - ``SelectorServices(use_fn, create_fn, delete_fn, refresh_fn,
   edit_fn=None, replace_fn=None, import_fn=None)`` —
   ``create_fn``/``delete_fn`` raise store exceptions
@@ -64,8 +66,10 @@ Contracts (Task 16 as built; binding for Tasks 17/18):
   refreshed.  Empty discovery → ``No legacy configuration files found
   in:`` + the legacy dir path + any-key dismiss.
 - Prompt footers (pinned): create label ``"New profile name: "``;
-  delete label ``"Delete profile '{name}'? [y/N]: "``; success
-  ``"Profile created: {name}"`` / ``"Deleted profile: {name}"``;
+  delete label ``"Delete profile '{name}'? [y/N]: "``; scope label
+  ``"Apply locally (l) or globally (g)? "`` (invalid answer footers
+  ``"Apply locally (l) or globally (g)"`` and KEEPS the prompt open);
+  success ``"Profile created: {name}"`` / ``"Deleted profile: {name}"``;
   failures ``"Profile name must not be empty"``,
   ``str(InvalidProfileName)``, ``"Profile already exists: {name}"``,
   ``"Profile '{name}' not found"``; decline ``"Delete cancelled"``;
@@ -87,7 +91,7 @@ from typing import Callable, NamedTuple
 from opencode_config_switcher import __version__
 from opencode_config_switcher.engine import (
     ReplaceResult, UseResult, UseStatus)
-from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.paths import ApplyScope, Paths
 from opencode_config_switcher.profiles import (
     InvalidProfileName,
     ProfileExistsError,
@@ -98,7 +102,8 @@ __all__ = [
     "display_width", "truncate_display",
     "LayoutMode", "compute_layout", "left_width", "NarrowPane",
     "AppState", "handle_key",
-    "CREATE_PROMPT_LABEL", "delete_prompt_label", "compose_footer",
+    "CREATE_PROMPT_LABEL", "SCOPE_PROMPT_LABEL", "delete_prompt_label",
+    "compose_footer",
     "TuiOutcome", "TuiResult",
     "SelectorServices", "run_profile_tui", "EDITOR_AVAILABLE",
     "ReplaceFormState", "replace_form_key", "replace_hit_lines",
@@ -332,6 +337,8 @@ def handle_key(state: AppState, key: str) -> str | None:
 
 CREATE_PROMPT_LABEL = "New profile name: "
 
+SCOPE_PROMPT_LABEL = "Apply locally (l) or globally (g)? "
+
 
 def delete_prompt_label(name: str) -> str:
     """The inline delete-confirmation footer label."""
@@ -390,7 +397,9 @@ class TuiResult:
 class SelectorServices(NamedTuple):
     """Every mutating action the selector can perform.
 
-    ``use_fn(name) -> UseResult``; ``create_fn(name)`` /
+    ``use_fn(name, scope) -> UseResult`` — applies *name* at *scope*
+    (:class:`ApplyScope.LOCAL` for the project ``.omo/omo.jsonc``,
+    GLOBAL for ``~/.omo/omo.jsonc``); ``create_fn(name)`` /
     ``delete_fn(name)`` raise store exceptions which become footer
     status lines; ``refresh_fn() -> list[ProfileSummary]`` rebuilds the
     menu after a mutation (selection is clamped to the new list).
@@ -404,7 +413,7 @@ class SelectorServices(NamedTuple):
     ``import_fn`` and ``capture_fn`` before it offers itself.
     """
 
-    use_fn: Callable[[str], UseResult]
+    use_fn: Callable[[str, ApplyScope], UseResult]
     create_fn: Callable[[str], object]
     delete_fn: Callable[[str], object]
     refresh_fn: Callable[[], list]
@@ -811,8 +820,13 @@ def _refresh_menu(state: AppState, box: dict,
 
 
 def _submit_prompt(state: AppState, box: dict,
-                   services: SelectorServices) -> None:
-    """Act on the submitted prompt buffer; see module docstring."""
+                   services: SelectorServices) -> UseResult | None:
+    """Act on the submitted prompt buffer; see module docstring.
+
+    The ``scope`` branch returns the engine :class:`UseResult` (the
+    controller exits on APPLIED/NOOP); ``create``/``delete`` mutate
+    ``state.status`` and return ``None``.
+    """
     raw = _decode_prompt_buffer(state.prompt_buffer)
     if state.prompt == "create":
         name = raw.strip()
@@ -846,9 +860,29 @@ def _submit_prompt(state: AppState, box: dict,
                     state.status = f"Deleted profile: {name}"
         else:
             state.status = "Delete cancelled"
+    elif state.prompt == "scope":
+        if raw in ("l", "L"):
+            scope = ApplyScope.LOCAL
+        elif raw in ("g", "G", ""):
+            scope = ApplyScope.GLOBAL
+        else:
+            # A typo re-prompts — never falls back to a scope.
+            state.status = "Apply locally (l) or globally (g)"
+            state.prompt_buffer = ""
+            return None
+        summaries = box["summaries"]
+        if state.selected_idx >= len(summaries):
+            state.status = "No profiles"
+        else:
+            name = summaries[state.selected_idx].record.name
+            state.prompt = None
+            state.prompt_label = ""
+            state.prompt_buffer = ""
+            return services.use_fn(name, scope)
     state.prompt = None
     state.prompt_label = ""
     state.prompt_buffer = ""
+    return None
 
 
 class _Suspend(NamedTuple):
@@ -1094,6 +1128,10 @@ def run_profile_tui(summaries: list,
         _init_colors()
         attrs = _color_attrs()
         stdscr.keypad(True)
+        # Poll wakeup: a SIGWINCH delivered outside a blocking read
+        # can be dropped by curses (KEY_RESIZE never surfaces), so the
+        # selector must not depend on the signal alone to redraw.
+        stdscr.timeout(250)
 
         # Task 17 first-check: empty store + capable services → onboarding
         # modal runs BEFORE the main selector loop.
@@ -1254,6 +1292,19 @@ def run_profile_tui(summaries: list,
 
             # Input — modals first, then the selector key router
             key = stdscr.getch()
+            if key == -1:
+                # Timeout wakeup: resync a resize whose SIGWINCH was
+                # swallowed while the loop was drawing (not blocked in
+                # a read).  The kernel's TIOCGWINSZ is the truth;
+                # resizeterm forces the window to match so the next
+                # iteration re-renders at the real size.
+                try:
+                    real = os.get_terminal_size(0)
+                except OSError:
+                    continue
+                if (real.lines, real.columns) != stdscr.getmaxyx():
+                    curses.resizeterm(real.lines, real.columns)
+                continue
             if key == curses.KEY_RESIZE:
                 curses.update_lines_cols()
                 state.clamp()
@@ -1305,17 +1356,9 @@ def run_profile_tui(summaries: list,
                 if not current:
                     state.status = "No profiles"
                 else:
-                    selected = current[state.selected_idx]
-                    result = services.use_fn(selected.record.name)
-                    if result.status in (UseStatus.BLOCKED,
-                                         UseStatus.FAILED):
-                        state.status = result.message
-                    elif result.status == UseStatus.NOOP:
-                        return TuiResult(TuiOutcome.NOOP,
-                                         apply_result=result)
-                    else:
-                        return TuiResult(TuiOutcome.APPLIED,
-                                         apply_result=result)
+                    state.prompt = "scope"
+                    state.prompt_label = SCOPE_PROMPT_LABEL
+                    state.prompt_buffer = ""
             elif intent == "create":
                 state.prompt = "create"
                 state.prompt_label = CREATE_PROMPT_LABEL
@@ -1361,7 +1404,17 @@ def run_profile_tui(summaries: list,
                         ]
                     box["modal"] = ("import", screen)
             elif intent == "prompt_submit":
-                _submit_prompt(state, box, services)
+                result = _submit_prompt(state, box, services)
+                if isinstance(result, UseResult):
+                    if result.status in (UseStatus.BLOCKED,
+                                         UseStatus.FAILED):
+                        state.status = result.message
+                    elif result.status == UseStatus.NOOP:
+                        return TuiResult(TuiOutcome.NOOP,
+                                         apply_result=result)
+                    else:
+                        return TuiResult(TuiOutcome.APPLIED,
+                                         apply_result=result)
             state.clamp()
 
     try:

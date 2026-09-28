@@ -22,6 +22,17 @@ Contracts (binding for Tasks 7/8/9/12):
   AND ``drift_status == "managed"`` → NOOP with ZERO writes (not even a
   touch) → otherwise backup-if-exists, render write, ``set_active``.
 
+- Apply scope: ``use_profile`` takes ``scope`` (``ApplyScope.GLOBAL``
+  default) and an optional ``cwd``.  GLOBAL keeps the order above
+  byte-for-byte.  LOCAL resolves ``cwd`` (default: process working
+  directory, read inside the call only) through
+  ``paths.project_omo_paths`` and renders into ``<cwd>/.omo/omo.jsonc``
+  created on demand, merging over the LOCAL file as the base — there is
+  NO NOOP check and NO ``set_active`` write; messages are unchanged.
+  ``UseResult.omo_path`` is the target omo.jsonc path (global or local);
+  ``UseResult.backup`` carries the ``.BAK`` path ONLY when a backup copy
+  actually happened, else ``None``.
+
 - A ``LoadError`` live document (corrupt or unreadable ``omo.jsonc``) is
   treated as ABSENT for rendering (fresh start) but still byte-preserved
   into the single-generation ``.BAK`` — a corrupt live file never blocks.
@@ -109,7 +120,11 @@ from opencode_config_switcher.omoconfig import (
     load_omo_document,
     replace_sections,
 )
-from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.paths import (
+    ApplyScope,
+    Paths,
+    project_omo_paths,
+)
 from opencode_config_switcher.profiles import (
     InvalidProfileName,
     ProfileExistsError,
@@ -153,13 +168,20 @@ class UseStatus(str, Enum):
 
 @dataclass(frozen=True)
 class UseResult:
-    """Immutable result of one engine operation."""
+    """Immutable result of one engine operation.
+
+    ``omo_path`` is the TARGET omo.jsonc path of the operation: the
+    global ``~/.omo/omo.jsonc`` for GLOBAL applies and captures, or the
+    project-scoped ``<cwd>/.omo/omo.jsonc`` for LOCAL applies.  ``backup``
+    is the ``.BAK`` path ONLY when a backup copy actually happened;
+    otherwise it is ``None`` (no ``.BAK`` exists on disk).
+    """
 
     status: UseStatus
     profile: str
     omo_path: Path
-    backup: Path
     message: str
+    backup: Path | None = None
     error: str | None = None
 
 
@@ -176,14 +198,30 @@ def render_document(record_document: OmoDocument,
     return replace_sections(live, record_document)
 
 
-def use_profile(paths: Paths, name: str) -> UseResult:
-    """Render ``name``'s profile into ``~/.omo/omo.jsonc``; see module doc."""
+def use_profile(paths: Paths, name: str, *,
+                scope: ApplyScope = ApplyScope.GLOBAL,
+                cwd: Path | None = None) -> UseResult:
+    """Render ``name``'s profile into the scoped omo.jsonc; module doc.
+
+    GLOBAL (default) keeps the home semantics byte-for-byte.  LOCAL
+    targets ``<cwd>/.omo/omo.jsonc`` — ``cwd`` defaults to the process
+    working directory, resolved inside this call — merging over the
+    LOCAL file: no active-marker NOOP check, no ``.active`` write, and
+    no global file touched.
+    """
+    if scope is ApplyScope.LOCAL:
+        cwd = cwd or Path.cwd()
+        target, backup = project_omo_paths(cwd)
+    else:
+        target, backup = paths.omo_path, paths.omo_backup
+
+    backup_written: Path | None = None
 
     def result(status: UseStatus, message: str,
                error: str | None = None) -> UseResult:
         return UseResult(
-            status=status, profile=name, omo_path=paths.omo_path,
-            backup=paths.omo_backup, message=message, error=error,
+            status=status, profile=name, omo_path=target,
+            backup=backup_written, message=message, error=error,
         )
 
     try:
@@ -200,7 +238,8 @@ def use_profile(paths: Paths, name: str) -> UseResult:
             error=record.error,
         )
 
-    if (read_active(paths) == name
+    if (scope is ApplyScope.GLOBAL
+            and read_active(paths) == name
             and drift_status(paths, record) == "managed"):
         return result(
             UseStatus.NOOP,
@@ -208,20 +247,22 @@ def use_profile(paths: Paths, name: str) -> UseResult:
         )
 
     merged = render_document(
-        record.document, load_omo_document(paths.omo_path))
+        record.document, load_omo_document(target))
 
-    if paths.omo_path.exists():
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
         try:
-            shutil.copy2(paths.omo_path, paths.omo_backup)
+            shutil.copy2(target, backup)
         except Exception as exc:
             return result(
                 UseStatus.FAILED,
                 f"Failed to create backup: {type(exc).__name__}: {exc}",
                 error=str(exc),
             )
+        backup_written = backup
 
     try:
-        paths.omo_path.write_text(jsonc_dumps(merged), encoding="utf-8")
+        target.write_text(jsonc_dumps(merged), encoding="utf-8")
     except Exception as exc:
         return result(
             UseStatus.FAILED,
@@ -229,7 +270,8 @@ def use_profile(paths: Paths, name: str) -> UseResult:
             error=str(exc),
         )
 
-    set_active(paths, name)
+    if scope is ApplyScope.GLOBAL:
+        set_active(paths, name)
     return result(UseStatus.APPLIED, f"Profile applied: {name}")
 
 
@@ -245,7 +287,7 @@ def capture_current(paths: Paths, name: str, *,
                error: str | None = None) -> UseResult:
         return UseResult(
             status=status, profile=name, omo_path=paths.omo_path,
-            backup=paths.omo_backup, message=message, error=error,
+            backup=None, message=message, error=error,
         )
 
     live = load_omo_document(paths.omo_path)
