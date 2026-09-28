@@ -6,6 +6,13 @@ Contract notes (binding for Tasks 7/8/9/12):
 - ``use_profile`` order: not-found/invalid-name BLOCKED, invalid record
   BLOCKED (zero writes), active+managed NOOP (zero writes — mtime pinned),
   else backup-if-exists -> render write -> ``set_active`` -> APPLIED.
+- Scope (apply-scope plan): GLOBAL keeps the order above byte-for-byte.
+  LOCAL renders into ``<cwd>/.omo/omo.jsonc`` (``cwd`` defaults to the
+  process working directory) merging over the LOCAL file, never NOOPs,
+  never writes ``.active``, and leaves every global file untouched.
+- ``UseResult.backup`` is the ``.BAK`` path ONLY when a backup copy
+  actually happened; it is ``None`` exactly when no ``.BAK`` exists on
+  disk after the call (asserted via ``_assert_backup_truthful``).
 - A corrupt (LoadError) live ``omo.jsonc`` is treated as ABSENT for the
   render (fresh start) but still byte-preserved into the ``.BAK``.
 - Backup happens BEFORE the render write: a failed write leaves the backup
@@ -15,6 +22,7 @@ Contract notes (binding for Tasks 7/8/9/12):
 - Exact message templates asserted; see the engine module docstring.
 """
 
+import os
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -36,7 +44,7 @@ from opencode_config_switcher.omoconfig import (
     OmoDocument,
     replace_sections,
 )
-from opencode_config_switcher.paths import Paths
+from opencode_config_switcher.paths import ApplyScope, Paths, project_omo_paths
 from opencode_config_switcher.profiles import (
     drift_status,
     read_active,
@@ -83,6 +91,16 @@ def _write_live(paths: Paths, document: dict) -> None:
     paths.omo_path.write_text(jsonc_dumps(document), encoding="utf-8")
 
 
+def _assert_backup_truthful(test: unittest.TestCase, result: UseResult,
+                            backup_path: Path) -> None:
+    """``result.backup`` is None EXACTLY when no ``.BAK`` is on disk."""
+    if result.backup is None:
+        test.assertFalse(backup_path.exists())
+    else:
+        test.assertEqual(result.backup, backup_path)
+        test.assertTrue(backup_path.exists())
+
+
 def _assert_same_value_and_order(test: unittest.TestCase,
                                  actual: object, expected: object) -> None:
     """Deep equality INCLUDING dict key order at every level."""
@@ -121,6 +139,13 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             result.status = UseStatus.APPLIED  # type: ignore[misc]
 
+    def test_use_result_backup_defaults_to_none(self):
+        result = UseResult(
+            status=UseStatus.NOOP, profile="p", omo_path=Path("/x"),
+            message="m",
+        )
+        self.assertIsNone(result.backup)
+
 
 class RenderDocumentTests(unittest.TestCase):
     def test_absent_live_starts_from_empty(self):
@@ -155,7 +180,7 @@ class UseProfileFreshHomeTests(TempHomeTestCase):
         self.assertEqual(result.message, "Profile applied: work")
         self.assertEqual(result.profile, "work")
         self.assertEqual(result.omo_path, self.paths.omo_path)
-        self.assertEqual(result.backup, self.paths.omo_backup)
+        self.assertIsNone(result.backup)
         self.assertIsNone(result.error)
 
         text = self.paths.omo_path.read_text(encoding="utf-8")
@@ -166,7 +191,7 @@ class UseProfileFreshHomeTests(TempHomeTestCase):
         self.assertEqual(parsed["$schema"], OMO_SCHEMA_URL)
         self.assertEqual(parsed["[opencode]"], PROFILE_SECTION)
 
-        self.assertFalse(self.paths.omo_backup.exists())  # nothing existed
+        _assert_backup_truthful(self, result, self.paths.omo_backup)
         self.assertEqual(read_active(self.paths), "work")
         self.assertEqual(
             self.paths.active_marker.read_text(encoding="utf-8"), "work\n")
@@ -191,6 +216,8 @@ class UseProfileExistingFileTests(TempHomeTestCase):
         self.assertEqual(list(after.keys()), list(LIVE_MULTI.keys()))
 
         self.assertEqual(self.paths.omo_backup.read_bytes(), pre_write_bytes)
+        self.assertEqual(result.backup, self.paths.omo_backup)
+        _assert_backup_truthful(self, result, self.paths.omo_backup)
         self.assertEqual(read_active(self.paths), "work")
 
     def test_managed_second_use_is_noop_with_zero_writes(self):
@@ -328,6 +355,129 @@ class UseProfileFailureTests(TempHomeTestCase):
         self.assertEqual(self.paths.omo_path.read_bytes(), live_bytes)
         self.assertEqual(self.paths.omo_backup.read_bytes(), live_bytes)
         self.assertIsNone(read_active(self.paths))  # set_active never reached
+
+
+class UseProfileLocalScopeTests(TempHomeTestCase):
+    """LOCAL applies render into ``<cwd>/.omo/omo.jsonc`` (write-only)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        _write_profile(self.paths, "work", PROFILE_DOC)
+        cwd_tmp = TemporaryDirectory()
+        self.addCleanup(cwd_tmp.cleanup)
+        self.cwd = Path(cwd_tmp.name)
+        self.local_omo, self.local_bak = project_omo_paths(self.cwd)
+
+    def _write_local(self, document: dict) -> None:
+        self.local_omo.parent.mkdir(parents=True, exist_ok=True)
+        self.local_omo.write_text(jsonc_dumps(document), encoding="utf-8")
+
+    def test_local_merges_over_local_base_not_global(self):
+        _write_live(self.paths, LIVE_MULTI)
+        global_bytes = self.paths.omo_path.read_bytes()
+        local_base = {
+            "$schema": OMO_SCHEMA_URL,
+            "[opencode]": {"model": "stale"},
+            "[codex]": {"model": "local-marker", "only": "in-local"},
+        }
+        self._write_local(local_base)
+        local_bytes_before = self.local_omo.read_bytes()
+
+        result = use_profile(self.paths, "work",
+                             scope=ApplyScope.LOCAL, cwd=self.cwd)
+
+        self.assertEqual(result.status, UseStatus.APPLIED)
+        self.assertEqual(result.message, "Profile applied: work")
+        self.assertEqual(result.omo_path, self.local_omo)
+        _assert_backup_truthful(self, result, self.local_bak)
+        self.assertEqual(self.local_bak.read_bytes(), local_bytes_before)
+
+        after = jsonc_loads(self.local_omo.read_text(encoding="utf-8"))
+        self.assertEqual(after["[opencode]"], PROFILE_SECTION)
+        # Probe stale_state: the merge base is the LOCAL file — its
+        # undefined section survives and global-only keys never leak in.
+        self.assertEqual(after["[codex]"], local_base["[codex]"])
+        self.assertNotIn("codegraph", after)
+        self.assertNotIn("profiles", after)
+
+        self.assertEqual(self.paths.omo_path.read_bytes(), global_bytes)
+        self.assertFalse(self.paths.omo_backup.exists())
+        self.assertIsNone(read_active(self.paths))
+
+    def test_local_fresh_cwd_renders_fresh_with_no_backup(self):
+        _write_live(self.paths, LIVE_MULTI)
+        global_bytes = self.paths.omo_path.read_bytes()
+
+        result = use_profile(self.paths, "work",
+                             scope=ApplyScope.LOCAL, cwd=self.cwd)
+
+        self.assertEqual(result.status, UseStatus.APPLIED)
+        self.assertEqual(result.omo_path, self.local_omo)
+        self.assertIsNone(result.backup)
+        _assert_backup_truthful(self, result, self.local_bak)
+
+        after = jsonc_loads(self.local_omo.read_text(encoding="utf-8"))
+        self.assertEqual(list(after.keys()), ["$schema", "[opencode]"])
+        self.assertEqual(after["[opencode]"], PROFILE_SECTION)
+
+        self.assertEqual(self.paths.omo_path.read_bytes(), global_bytes)
+        self.assertFalse(self.paths.omo_backup.exists())
+        self.assertIsNone(read_active(self.paths))
+
+    def test_local_reapply_is_always_applied_never_noop(self):
+        _write_live(self.paths, LIVE_MULTI)
+        # Globally active + managed is the NOOP precondition; LOCAL must
+        # still render, so this setup makes the skipped check observable.
+        self.assertEqual(
+            use_profile(self.paths, "work").status, UseStatus.APPLIED)
+        self.assertEqual(read_active(self.paths), "work")
+        global_bytes = self.paths.omo_path.read_bytes()
+
+        first = use_profile(self.paths, "work",
+                            scope=ApplyScope.LOCAL, cwd=self.cwd)
+        self.assertEqual(first.status, UseStatus.APPLIED)
+        second = use_profile(self.paths, "work",
+                             scope=ApplyScope.LOCAL, cwd=self.cwd)
+
+        self.assertEqual(second.status, UseStatus.APPLIED)
+        self.assertEqual(second.message, "Profile applied: work")
+        after = jsonc_loads(self.local_omo.read_text(encoding="utf-8"))
+        self.assertEqual(after["[opencode]"], PROFILE_SECTION)
+        self.assertEqual(self.paths.omo_path.read_bytes(), global_bytes)
+
+    def test_local_cwd_defaults_to_process_cwd(self):
+        old_cwd = Path.cwd()
+        os.chdir(self.cwd)
+        try:
+            result = use_profile(self.paths, "work", scope=ApplyScope.LOCAL)
+        finally:
+            os.chdir(old_cwd)
+
+        self.assertEqual(result.status, UseStatus.APPLIED)
+        # Path.cwd() resolves macOS /var -> /private/var, so compare
+        # resolved forms; both denote the same on-disk target.
+        self.assertEqual(result.omo_path.resolve(), self.local_omo.resolve())
+        self.assertTrue(self.local_omo.exists())
+        self.assertIsNone(read_active(self.paths))
+
+    def test_local_backup_failure_failed_with_no_partial_write(self):
+        self._write_local({"[opencode]": {"model": "stale"}})
+        local_bytes = self.local_omo.read_bytes()
+        _write_live(self.paths, LIVE_MULTI)
+        global_bytes = self.paths.omo_path.read_bytes()
+
+        with patch("shutil.copy2", side_effect=OSError("boom")):
+            result = use_profile(self.paths, "work",
+                                 scope=ApplyScope.LOCAL, cwd=self.cwd)
+
+        self.assertEqual(result.status, UseStatus.FAILED)
+        self.assertEqual(
+            result.message, "Failed to create backup: OSError: boom")
+        self.assertEqual(result.error, "boom")
+        self.assertEqual(self.local_omo.read_bytes(), local_bytes)
+        self.assertFalse(self.local_bak.exists())
+        self.assertEqual(self.paths.omo_path.read_bytes(), global_bytes)
+        self.assertIsNone(read_active(self.paths))
 
 
 class CaptureCurrentTests(TempHomeTestCase):
