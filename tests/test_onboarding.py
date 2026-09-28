@@ -294,7 +294,7 @@ class PlainOnboardingTests(PlainOnboardingTestCase):
             "  1) alpha\n"
             "  2) beta\n"
             "Profile applied: alpha\n"
-            f"Backup saved to: {paths.omo_backup}\n")
+            f"Applied to: {paths.omo_path}\n")
         self.assertEqual(prompts,
                          ["Choose 2-3 or q: ", "Select 1-2 or q: "])
         self.assertIn('"[opencode]"', omo)

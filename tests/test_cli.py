@@ -81,14 +81,14 @@ def _home_with(profiles=None, *, active=None, omo_text=None):
         yield home
 
 
-def _run_cli(args, *, home, stdin=""):
+def _run_cli(args, *, home, stdin="", cwd=None):
     """Real-surface proof: run the module entry point under a temp HOME."""
     env = {**os.environ, "PYTHONPATH": str(SRC), "HOME": str(home)}
     env.pop("OC_SWITCHER_HOME", None)
     return subprocess.run(
         [PY, "-m", "opencode_config_switcher", *args],
         input=stdin, capture_output=True, text=True,
-        env=env, timeout=60,
+        env=env, timeout=60, cwd=cwd,
     )
 
 
@@ -274,6 +274,7 @@ class BarePlainSelectorTests(unittest.TestCase):
                 "  2) beta\n"
                 "Select 1-2 or q: "
                 "Profile applied: alpha\n"
+                f"Applied to: {paths.omo_path}\n"
                 + backup_line
             )
             rendered = render_document(
@@ -506,7 +507,9 @@ class UseTests(unittest.TestCase):
                 encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout,
-                         "Profile applied: alpha\n" + backup_line)
+                         "Profile applied: alpha\n"
+                         f"Applied to: {home / '.omo' / 'omo.jsonc'}\n"
+                         + backup_line)
         self.assertEqual(active, "alpha\n")
         self.assertEqual(
             omo,
@@ -552,7 +555,7 @@ class UseTests(unittest.TestCase):
             "  1) alpha\n"
             "Select 1-1 or q: "
             "Profile applied: alpha\n"
-            f"Backup saved to: {home / '.omo' / 'omo.jsonc.BAK'}\n")
+            f"Applied to: {home / '.omo' / 'omo.jsonc'}\n")
 
     def test_without_name_tty_routes_to_selector_stub(self):
         with _home_with({"alpha": ALPHA_TEXT}) as home:
@@ -576,7 +579,262 @@ class UseTests(unittest.TestCase):
         self.assertEqual(
             proc.stdout,
             "Profile applied: alpha\n"
+            f"Applied to: {home / '.omo' / 'omo.jsonc'}\n"
             f"Backup saved to: {home / '.omo' / 'omo.jsonc.BAK'}\n")
+
+
+class UseScopeTests(unittest.TestCase):
+    """Task 3 — ``--local``/``--global`` flags and the TTY ``[l/g]`` prompt.
+
+    Subprocess cases prove flag routing through the real entry point
+    under a temp HOME and temp project cwd; direct-call cases fake BOTH
+    streams as TTYs (the prompt requires ``stdin`` AND ``stdout`` tty)
+    with a mocked ``input()`` that echoes the prompt like the real one.
+    """
+
+    def _run_prompted(self, home, argv, answer, *, project=None,
+                      eof=False, interrupt=False):
+        prompts, out, err = [], _FakeTty(), io.StringIO()
+
+        def fake_input(prompt=""):
+            prompts.append(prompt)
+            out.write(prompt)
+            if eof:
+                raise EOFError
+            if interrupt:
+                raise KeyboardInterrupt
+            return answer
+
+        original_cwd = os.getcwd()
+        if project is not None:
+            os.chdir(project)
+        try:
+            with mock.patch("sys.stdin", _FakeTty()), \
+                    mock.patch("sys.stdout", out), \
+                    mock.patch("sys.stderr", err), \
+                    mock.patch("builtins.input", side_effect=fake_input), \
+                    mock.patch.dict(os.environ, {"HOME": str(home)}):
+                code = cli.main(list(argv))
+        finally:
+            if project is not None:
+                os.chdir(original_cwd)
+        return code, out.getvalue(), err.getvalue(), prompts
+
+    def test_local_flag_writes_only_project_file(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            proc = _run_cli(["use", "--local", "alpha"], home=home,
+                            cwd=str(cwd))
+            local_omo = cwd / ".omo" / "omo.jsonc"
+            local_text = (local_omo.read_text(encoding="utf-8")
+                          if local_omo.is_file() else "")
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+            active_exists = (home / ".omo" / "profiles" / ".active").exists()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Profile applied: alpha\n"
+            f"Applied to: {cwd.resolve() / '.omo' / 'omo.jsonc'}\n")
+        self.assertIn("provider-1/model-a", local_text)
+        self.assertFalse(global_exists)
+        self.assertFalse(active_exists)
+
+    def test_global_flag_writes_only_home_file(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            proc = _run_cli(["use", "--global", "alpha"], home=home,
+                            cwd=str(project))
+            local_exists = (Path(project) / ".omo" / "omo.jsonc").exists()
+            global_text = (home / ".omo" / "omo.jsonc").read_text(
+                encoding="utf-8")
+            active = (home / ".omo" / "profiles" / ".active").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Profile applied: alpha\n"
+            f"Applied to: {home / '.omo' / 'omo.jsonc'}\n")
+        self.assertFalse(local_exists)
+        self.assertIn("provider-1/model-a", global_text)
+        self.assertEqual(active, "alpha\n")
+
+    def test_select_local_alias_matches_use_local(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            proc = _run_cli(["select", "--local", "alpha"], home=home,
+                            cwd=str(cwd))
+            local_exists = (cwd / ".omo" / "omo.jsonc").is_file()
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "Profile applied: alpha\n"
+            f"Applied to: {cwd.resolve() / '.omo' / 'omo.jsonc'}\n")
+        self.assertTrue(local_exists)
+        self.assertFalse(global_exists)
+
+    def test_flag_without_name_exits_2_without_selector(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            for argv in (["use", "--local"], ["use", "--global"],
+                         ["select", "--local"], ["select", "--global"]):
+                with self.subTest(argv=argv):
+                    proc = _run_cli(argv, home=home, stdin="")
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertEqual(
+                        proc.stderr,
+                        "--local/--global require a profile name\n")
+                    self.assertEqual(proc.stdout, "")
+                    global_exists = (home / ".omo" / "omo.jsonc").exists()
+                    self.assertFalse(global_exists)
+
+    def test_local_and_global_flags_conflict_exits_2(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home:
+            proc = _run_cli(["use", "--local", "--global", "alpha"],
+                            home=home)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not allowed with argument", proc.stderr)
+
+    def test_no_flag_non_tty_applies_global_without_prompt(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            proc = _run_cli(["use", "alpha"], home=home, stdin="",
+                            cwd=str(project))
+            local_dir_exists = (Path(project) / ".omo").exists()
+            global_text = (home / ".omo" / "omo.jsonc").read_text(
+                encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("[l/g]", proc.stdout)
+        self.assertEqual(
+            proc.stdout,
+            "Profile applied: alpha\n"
+            f"Applied to: {home / '.omo' / 'omo.jsonc'}\n")
+        self.assertFalse(local_dir_exists)
+        self.assertIn("provider-1/model-a", global_text)
+
+    def test_flag_skips_prompt_on_tty(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            code, out, err, prompts = self._run_prompted(
+                home, ["use", "--local", "alpha"], "g", project=cwd)
+            local_exists = (cwd / ".omo" / "omo.jsonc").is_file()
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(prompts, [])
+        self.assertTrue(local_exists)
+        self.assertFalse(global_exists)
+
+    def test_prompt_l_applies_local(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            code, out, err, prompts = self._run_prompted(
+                home, ["use", "alpha"], "l", project=cwd)
+            local_exists = (cwd / ".omo" / "omo.jsonc").is_file()
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(prompts, [cli.SCOPE_PROMPT_LABEL])
+        self.assertEqual(
+            out,
+            cli.SCOPE_PROMPT_LABEL
+            + "Profile applied: alpha\n"
+            + f"Applied to: {cwd.resolve() / '.omo' / 'omo.jsonc'}\n")
+        self.assertTrue(local_exists)
+        self.assertFalse(global_exists)
+
+    def test_prompt_g_applies_global(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            code, out, err, prompts = self._run_prompted(
+                home, ["use", "alpha"], "g", project=Path(project))
+            local_dir_exists = (Path(project) / ".omo").exists()
+            active = (home / ".omo" / "profiles" / ".active").read_text(
+                encoding="utf-8")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(prompts, [cli.SCOPE_PROMPT_LABEL])
+        self.assertEqual(
+            out,
+            cli.SCOPE_PROMPT_LABEL
+            + "Profile applied: alpha\n"
+            + f"Applied to: {home / '.omo' / 'omo.jsonc'}\n")
+        self.assertFalse(local_dir_exists)
+        self.assertEqual(active, "alpha\n")
+
+    def test_prompt_empty_defaults_global(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            code, _, err, _ = self._run_prompted(
+                home, ["use", "alpha"], "", project=Path(project))
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+            local_dir_exists = (Path(project) / ".omo").exists()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(global_exists)
+        self.assertFalse(local_dir_exists)
+
+    def test_prompt_uppercase_l_and_g(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            code, _, err, _ = self._run_prompted(
+                home, ["use", "alpha"], "L", project=cwd)
+            local_exists = (cwd / ".omo" / "omo.jsonc").is_file()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(local_exists)
+
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            code, _, err, _ = self._run_prompted(
+                home, ["use", "alpha"], "G", project=Path(project))
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(global_exists)
+
+    def test_prompt_invalid_answer_exits_2_zero_writes(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            code, out, err, _ = self._run_prompted(
+                home, ["use", "alpha"], "x", project=cwd)
+            local_exists = (cwd / ".omo").exists()
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+            active_exists = (home / ".omo" / "profiles" / ".active").exists()
+        self.assertEqual(code, 2)
+        self.assertEqual(
+            err, "Invalid selection: 'x'; expected l or g\n")
+        self.assertEqual(out, cli.SCOPE_PROMPT_LABEL)
+        self.assertFalse(local_exists)
+        self.assertFalse(global_exists)
+        self.assertFalse(active_exists)
+
+    def test_prompt_eof_exits_0_zero_writes(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            code, out, err, _ = self._run_prompted(
+                home, ["use", "alpha"], "", project=cwd, eof=True)
+            local_exists = (cwd / ".omo").exists()
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, cli.SCOPE_PROMPT_LABEL
+                         + "Exiting without changes\n")
+        self.assertFalse(local_exists)
+        self.assertFalse(global_exists)
+
+    def test_prompt_interrupt_exits_0_zero_writes(self):
+        with _home_with({"alpha": ALPHA_TEXT}) as home, \
+                tempfile.TemporaryDirectory(prefix="ocs-proj-") as project:
+            cwd = Path(project)
+            code, out, err, _ = self._run_prompted(
+                home, ["use", "alpha"], "", project=cwd, interrupt=True)
+            local_exists = (cwd / ".omo").exists()
+            global_exists = (home / ".omo" / "omo.jsonc").exists()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, cli.SCOPE_PROMPT_LABEL
+                         + "Exiting without changes\n")
+        self.assertFalse(local_exists)
+        self.assertFalse(global_exists)
 
 
 class CreateTests(unittest.TestCase):
@@ -1219,7 +1477,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(
             proc_use.stdout,
             "Profile applied: cost-efficient\n"
-            f"Backup saved to: {paths.omo_backup}\n")
+            f"Applied to: {paths.omo_path}\n")
 
         expected_profile = jsonc_dumps(
             transform_legacy(json.loads(_legacy_json("prov/cost-efficient")))[0])
